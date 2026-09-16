@@ -147,7 +147,7 @@ reply text alone looks like a normal answer in that case.
 | `message` (required) | The message to send. |
 | `file` | Optional absolute path to a `.md` file to upload (e.g. a result for review). Only `.md`. |
 | `conversation` | `new` to start a fresh chat (first message of a work session), `continue` (default) to keep the bound conversation. |
-| `timeoutMs` | Max wait in ms (default 240000, hard cap 10 minutes). |
+| `timeoutMs` | Max wait in ms (default 240000, clamped to 5 s – 10 minutes). |
 | `saveTo` | Optional path; saves the reply there and any attachments into the same folder. Collision-safe: a file that already exists on disk (or repeats within one run) gets a numeric suffix — `plan.md` → `plan (1).md` — instead of being overwritten. |
 | `debug` | Diagnostic mode: the result also contains `rawSample` (first 20k chars of the raw captured stream) and `rawLen`. Use only when debugging reply truncation or parsing. |
 
@@ -155,7 +155,10 @@ reply text alone looks like a normal answer in that case.
 
 Checks whether the relay is running and whether an extension is connected —
 **without sending anything to ChatGPT**. Use this instead of probing with a test
-message. If the relay is down, it returns the exact command to start it.
+message. If the relay is down, it returns the exact command to start it. It also
+forwards the version-visibility fields (`relayVersion`, and `extension` with its
+`version` / `protocol` / `seenAt`), so "which build is actually running" is
+answerable from the status tool itself.
 
 ## Configuration
 
@@ -165,6 +168,12 @@ message. If the relay is down, it returns the exact command to start it.
 | `HOST` | `127.0.0.1` | Bind address. **Keep it localhost.** |
 | `BRIDGE_RELAY` | `http://127.0.0.1:8742` | Relay URL the MCP server calls. |
 | `BRIDGE_TOKEN` | _(unset)_ | Optional shared secret. When set, HTTP clients must send it as the `x-bridge-token` header and the extension must store it (see Security below). |
+| `BRIDGE_LOG_BODY` | `1` | Set to `0` to keep only the message *length* in relay logs instead of the first 80 characters (useful when message content must not appear in logs). |
+
+Request limits enforced by the relay: request body up to **10 MB**, composer
+message up to **200,000 characters** (longer content belongs in a `.md` file
+attachment), `timeoutMs` clamped to **5 s – 10 min**, at most **50** concurrent
+in-flight requests, and WebSocket messages up to **10 MB**.
 
 If you change the port, update the extension too (see `background.js`
 `DEFAULT_RELAY_URL`, or set `chrome.storage.local` `relayUrl`).
@@ -179,7 +188,10 @@ The relay binds to `127.0.0.1` and enforces three defenses out of the box:
    accepted from browser extensions (`chrome-extension://`). Ordinary web pages
    can therefore neither call the HTTP API nor open the WebSocket — even though
    browsers don't apply CORS to WebSockets or "simple" POSTs. Non-browser
-   clients (curl, Node) send no `Origin` and are unaffected.
+   clients (curl, Node) send no `Origin` and are unaffected. Honest scope note:
+   this proves "some extension", not "our extension" — any extension installed
+   in your browser passes the check. If you need isolation beyond the
+   localhost trust boundary, use the token below.
 3. **Optional token** — set `BRIDGE_TOKEN` to require a shared secret:
    - MCP / HTTP: start the relay **and** the MCP server with the same
      `BRIDGE_TOKEN` value; the MCP sends it as `x-bridge-token`.
@@ -196,6 +208,7 @@ Test with a token enabled:
 
 ```bash
 curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x-bridge-token: your-secret" -d '{"message":"hello"}'
+curl -s http://127.0.0.1:8742/health -H "x-bridge-token: your-secret"
 ```
 
 ## Troubleshooting

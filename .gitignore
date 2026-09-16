@@ -4,3 +4,4 @@ npm-debug.log*
 Thumbs.db
 *.log
 .env
+tools/raw-stream.txt

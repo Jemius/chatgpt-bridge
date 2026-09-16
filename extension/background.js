@@ -229,6 +229,12 @@ async function handleChat(msg) {
         markdown: (r && r.markdown) || '',
         attachments: (r && r.attachments) || [],
         failed: (r && r.failed) || [],
+        // N-14 field chain: forward the content script's blockedFeatures. This
+        // line was MISSING in v1.2.8..v1.2.11 — background silently dropped the
+        // field here, so the relay/MCP always saw [] and ChatGPT-side feature
+        // blocks (e.g. attachment quota) never reached the caller. Now covered
+        // by tools/test-bridge-fields.js so it cannot silently regress.
+        blockedFeatures: (r && r.blockedFeatures) || [],
         rawSample: (r && r.rawSample) || undefined,
         rawLen: (r && r.rawLen) || undefined
       });

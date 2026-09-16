@@ -7,6 +7,7 @@
 //   4. unknown message types don't touch extInfo
 //   5. after a disconnect the last-known identity is kept
 //   6. an old-style empty hello resets the fields to null (pre-1.2.11 compat)
+//   7. an end-to-end result round-trip forwards blockedFeatures (P0 fix guard)
 //
 // Spawns its own relay instance on PORT=8799 so it never fights the real one.
 'use strict';
@@ -124,6 +125,47 @@ async function main() {
     assert(h5.extension.version === null, 'empty hello -> version null (old extension)');
     assert(h5.extension.protocol === null, 'empty hello -> protocol null (old extension)');
     assert(h5.extension.seenAt > seenAt2, 'empty hello refreshes seenAt');
+    ws.close();
+
+    // [6] end-to-end: a relay `result` must forward blockedFeatures to the
+    // /api/chat caller (P0-fix guard at the HTTP boundary — the extension-side
+    // hops are pinned by tools/test-bridge-fields.js).
+    ws = await wsConnect();
+    const chatRes = await new Promise((resolve, reject) => {
+      const body = JSON.stringify({ message: 'field-chain probe', timeoutMs: 8000 });
+      const req = http.request(`${BASE}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+      }, (res) => {
+        let b = '';
+        res.on('data', (c) => { b += c; });
+        res.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } });
+      });
+      req.on('error', reject);
+      // The relay pushes the chat over WS; answer it exactly like the fixed
+      // extension does — a result carrying blockedFeatures.
+      ws.on('message', (data) => {
+        try {
+          const m = JSON.parse(data.toString());
+          if (m.type === 'chat' && m.id) {
+            ws.send(JSON.stringify({
+              type: 'result',
+              id: m.id,
+              markdown: 'probe reply',
+              attachments: [],
+              failed: [],
+              blockedFeatures: [{ name: 'file_upload', resetsAfter: '2030-01-01T00:00:00Z', description: 'probe quota block' }]
+            }));
+          }
+        } catch (e) {}
+      });
+      req.end(body);
+    });
+    assert(chatRes.ok === true, 'end-to-end probe resolves ok');
+    assert(chatRes.markdown === 'probe reply', 'end-to-end: markdown forwarded');
+    assert(Array.isArray(chatRes.blockedFeatures) && chatRes.blockedFeatures.length === 1 &&
+      chatRes.blockedFeatures[0].name === 'file_upload',
+      'end-to-end: blockedFeatures forwarded through /api/chat');
     ws.close();
 
     console.log(`\ntest-health: ${passed} passed, ${failures.length} failed`);

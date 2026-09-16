@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-bridge",
-  "version": "1.2.11",
+  "version": "1.2.12",
   "private": true,
   "license": "MIT",
   "description": "Bridge CLI AI tools (Claude Code / Codex / WorkBuddy) to ChatGPT in the browser via a local relay + MV3 extension.",
@@ -12,7 +12,7 @@
     "start": "node relay/server.js",
     "relay": "node relay/server.js",
     "mcp": "node mcp/index.js",
-    "test": "node tools/test-parse.js && node tools/test-artifacts.js && node tools/test-protocol.js && node tools/test-netdiag.js && node tools/test-health.js"
+    "test": "node tools/test-parse.js && node tools/test-artifacts.js && node tools/test-protocol.js && node tools/test-netdiag.js && node tools/test-bridge-fields.js && node tools/test-health.js"
   },
   "dependencies": {
     "ws": "^8.21.3"

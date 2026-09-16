@@ -46,6 +46,15 @@ const MAX_MESSAGE = 200 * 1024;
 // request from holding memory/connections forever.
 const MAX_TIMEOUT_MS = 10 * 60 * 1000;
 
+// Maximum size of a single WS message (10 MB, aligned with MAX_BODY). Result
+// messages carry attachments in full, so this must stay generous — but a limit
+// prevents a misbehaving local client from ballooning memory without bound.
+const MAX_WS_PAYLOAD = 10 * 1024 * 1024;
+
+// Maximum concurrent in-flight chat requests. A runaway local loop could
+// otherwise stack unbounded pending entries (each holding timers + memory).
+const MAX_PENDING = 50;
+
 // Connected extension WebSocket clients. The relay only needs ONE client (the
 // browser extension), but multiple may connect briefly (e.g. several browser
 // profiles). Requests are delivered to the first connected client only.
@@ -92,7 +101,11 @@ function isLoopbackHost(host) {
 function isAllowedOrigin(origin) {
   if (!origin) return true;                       // non-browser client (curl, Node, ...)
   if (origin === 'null') return false;            // sandboxed iframe / opaque origin
-  return /^chrome-extension:\/\//i.test(origin);  // only our own extension
+  // Any chrome-extension:// origin passes — the browser guarantees web pages
+  // cannot forge this scheme, but it does NOT identify WHICH extension is
+  // talking. A malicious extension could connect; set BRIDGE_TOKEN if you
+  // need stronger isolation than the localhost trust boundary.
+  return /^chrome-extension:\/\//i.test(origin);
 }
 
 function rejectHttp(res, error) {
@@ -172,16 +185,31 @@ const server = http.createServer((req, res) => {
         });
       }
 
-      console.log(`[relay] chat request: ${JSON.stringify(message).slice(0, 80)} (clients=${clients.size})`);
+      // Log a bounded slice of the ORIGINAL string: JSON.stringify-ing the
+      // whole message first cost memory on huge bodies and echoed user
+      // content into the log. BRIDGE_LOG_BODY=0 keeps only the length.
+      const reqDesc = process.env.BRIDGE_LOG_BODY === '0'
+        ? `(${message.length} chars)`
+        : message.slice(0, 80);
+      console.log(`[relay] chat request: ${reqDesc} (clients=${clients.size})`);
       if (clients.size === 0) {
         return sendJson(res, 503, {
           ok: false,
           error: 'no browser extension connected — load the extension and open chatgpt.com'
         });
       }
+      if (pending.size >= MAX_PENDING) {
+        return sendJson(res, 503, {
+          ok: false,
+          error: `relay busy: ${pending.size} requests in flight (max ${MAX_PENDING}) — retry later`
+        });
+      }
 
       const id = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const timeoutMs = Math.min(Number(input.timeoutMs) || 240000, MAX_TIMEOUT_MS);
+      // Clamp on both ends: a negative/zero timeoutMs used to reach setTimeout
+      // unclamped and fire immediately; the floor keeps callers from doing
+      // that by accident. (The extension budgets its phases against this.)
+      const timeoutMs = Math.max(5000, Math.min(Number(input.timeoutMs) || 240000, MAX_TIMEOUT_MS));
 
       const result = await new Promise((resolve) => {
         const timer = setTimeout(() => {
@@ -243,7 +271,7 @@ server.on('error', (err) => {
 // browsers do not apply CORS to WebSockets, so any webpage could otherwise
 // connect to ws://127.0.0.1:8742/ws and impersonate the extension (and with
 // single-client delivery, even intercept the message stream).
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_PAYLOAD });
 
 server.on('upgrade', (req, socket, head) => {
   const reject = () => {

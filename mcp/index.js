@@ -17,6 +17,10 @@ const readline = require('readline');
 const fs = require('fs');
 const path = require('path');
 
+// Single source of truth for the MCP server version (package.json). It used to
+// be a hardcoded '1.2.0' in serverInfo and drifted from the real version.
+const PKG = require('../package.json');
+
 // The relay HTTP endpoint. Override with BRIDGE_RELAY if you changed the port.
 const RELAY = process.env.BRIDGE_RELAY || 'http://127.0.0.1:8742';
 
@@ -97,7 +101,13 @@ async function checkStatus() {
     return {
       relayRunning: true,
       extensionConnected: !!(data && data.clients > 0),
-      clientCount: (data && data.clients) || 0
+      clientCount: (data && data.clients) || 0,
+      // Version visibility (v1.2.11+): pass the relay's own build and the last
+      // reported extension identity through verbatim, so "which build is
+      // actually running" is answerable from the status tool too. Null
+      // extension fields mean a pre-1.2.11 extension (or none) has connected.
+      relayVersion: (data && data.relay && data.relay.version) || null,
+      extension: (data && data.extension) || null
     };
   } catch {
     return {
@@ -214,7 +224,7 @@ rl.on('line', async (line) => {
       result: {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'chatgpt-bridge', version: '1.2.0' }
+        serverInfo: { name: 'chatgpt-bridge', version: PKG.version }
       }
     });
   }

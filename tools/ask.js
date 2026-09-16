@@ -1,9 +1,10 @@
 // chatgpt-bridge · minimal end-to-end harness
 //
 // Sends one message through relay -> extension -> ChatGPT and prints the reply
-// with its length. This is the reproduction harness for the P0 bug (see
-// ISSUES.md): run it repeatedly with the built-in long-reply prompt and compare
-// the lengths — a correct bridge returns the same complete answer every time.
+// with its length. This is the reproduction harness for the original P0 bug
+// (fixed; see README Troubleshooting): run it repeatedly with the built-in
+// long-reply prompt and compare the lengths — a correct bridge returns the
+// same complete answer every time.
 //
 // Usage:
 //   node tools/ask.js                       # built-in long-reply repro

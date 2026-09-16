@@ -16,7 +16,8 @@
 //   node tools/ask-debug.js ../.workbuddy-ai/tmp/t-mid.txt
 //
 // Requires the extension to be reloaded AND the ChatGPT tab refreshed (see
-// ISSUES.md P0-2), otherwise `rawSample` is never returned.
+// README Troubleshooting, protocol-version handshake), otherwise `rawSample`
+// is never returned.
 const fs = require('fs');
 const path = require('path');
 
@@ -113,8 +114,8 @@ async function main() {
     console.log('   either background.js is stale (never forwards `debug`) or content.js is');
     console.log('   stale (never returns `rawSample`). Reload the extension at');
     console.log('   chrome://extensions AND refresh the ChatGPT tab, then retry.');
-    console.log('   See ISSUES.md P0-2 — an already-open tab keeps the old injected.js');
-    console.log('   forever because its MAIN-world guard survives the reload.');
+    console.log('   See README Troubleshooting — an already-open tab keeps the old');
+    console.log('   injected.js forever because its MAIN-world guard survives the reload.');
     process.exit(2);
   }
 
