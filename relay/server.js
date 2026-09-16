@@ -269,6 +269,9 @@ wss.on('connection', (ws) => {
             markdown: msg.markdown || '',
             attachments: msg.attachments || [],
             failed: msg.failed || [],
+            // N-14: ChatGPT-side feature blocks (e.g. attachment quota) —
+            // always forwarded so callers can detect refusals without debug.
+            blockedFeatures: msg.blockedFeatures || [],
             // only present when the caller asked for debug
             rawSample: msg.rawSample,
             rawLen: msg.rawLen

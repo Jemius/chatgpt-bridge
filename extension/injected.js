@@ -51,7 +51,7 @@
   // inside an open tab. The version attribute lets the content script detect
   // that stale state and fail loudly ("refresh the ChatGPT page") instead of
   // silently parsing with old capture code.
-  const PROTOCOL = 4;
+  const PROTOCOL = 5;
   function exposeProtocol() {
     const el = document.documentElement;
     if (!el) { setTimeout(exposeProtocol, 0); return; }
@@ -170,6 +170,7 @@
       type: 'reply',
       requestId: reqId,
       reply,
+      blockedFeatures: entry.blockedFeatures || [],
       rawLen: entry.raw.length,
       rawSample: entry.raw.slice(0, 20000)
     });
@@ -224,6 +225,33 @@
     }
   }
 
+  // N-14 helper: depth-limited deep scan for `blocked_features` arrays anywhere
+  // inside a parsed SSE frame (ChatGPT nests them under
+  // conversation_detail_metadata, sometimes directly under the frame's v).
+  // Dedup happens on the entry via name+resets_after, so repeated frames
+  // collapse to one entry.
+  function scanBlockedFeatures(obj, entry, depth) {
+    if (!obj || typeof obj !== 'object' || depth > 8) return;
+    if (Array.isArray(obj.blocked_features)) {
+      for (const f of obj.blocked_features) {
+        if (!f || typeof f !== 'object') continue;
+        const key = String(f.name || '') + '|' + String(f.resets_after || '');
+        if (!entry.blockedKeys) entry.blockedKeys = new Set();
+        if (entry.blockedKeys.has(key)) continue;
+        entry.blockedKeys.add(key);
+        if (!entry.blockedFeatures) entry.blockedFeatures = [];
+        entry.blockedFeatures.push({
+          name: f.name,
+          resetsAfter: f.resets_after,
+          description: f.description
+        });
+      }
+    }
+    for (const k of Object.keys(obj)) {
+      try { scanBlockedFeatures(obj[k], entry, depth + 1); } catch (e) { /* skip unreadable value */ }
+    }
+  }
+
   // Recursively extract reply text, covering the delta formats ChatGPT has used:
   //   - a path-scoped write: {"p":"/message/content/parts/0","o":"append","v":"..."}
   //     (also "replace"/"add"/"set"; "patch" wraps an array of such operations)
@@ -233,6 +261,15 @@
   function collectText(obj, entry) {
     if (!obj || typeof obj !== 'object') return;
     if (Array.isArray(obj)) { for (const x of obj) collectText(x, entry); return; }
+
+    // N-14: ChatGPT-side feature blocks (e.g. the attachment-quota block) ride
+    // along inside metadata frames, nested at any depth (e.g.
+    // v.conversation_detail_metadata.blocked_features, or v.blocked_features
+    // on a p:"/conversation/metadata" frame). Deep-scan the frame and collect
+    // them so the caller can tell "ChatGPT explicitly refused" apart from
+    // "the model simply did not produce a file" — previously this only
+    // surfaced by luck inside rawSample.
+    scanBlockedFeatures(obj, entry, 0);
 
     const p = typeof obj.p === 'string' ? obj.p : null;
     if (p && /^\/message\/content\/parts\/\d+$/.test(p) && typeof obj.v === 'string') {

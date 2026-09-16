@@ -46,7 +46,8 @@ const CHAT_TOOL = {
   name: 'chatgpt_send',
   description:
     'Send a message to ChatGPT open in your browser and get its reply. ' +
-    'Returns JSON: { reply, attachments:[{filename,content}], failed:[{filename,error}], savedPaths:[...] }. ' +
+    'Returns JSON: { reply, attachments:[{filename,content}], failed:[{filename,error}], blockedFeatures:[{name,resetsAfter,description}], savedPaths:[...] }. ' +
+    'blockedFeatures is non-empty when ChatGPT itself blocked a feature (e.g. attachment quota exhausted) — check it before assuming the model ignored a file. ' +
     'Useful for a planner-executor loop: send a task/result, get back a Markdown plan or next task. ' +
     'Notes: ' +
     '(1) attachments[].content already contains the FULL file content — do NOT ask ChatGPT to also paste it inline; keep the reply text short. ' +
@@ -194,7 +195,10 @@ async function callChatgpt(args) {
   // Pass the debug fields through (undefined unless the caller asked for
   // debug). Without this the MCP-side debug output was ALWAYS empty —
   // rawSample/rawLen existed in the relay response but were dropped here.
+  // blockedFeatures (N-14) always travels: it is the structured signal for
+  // ChatGPT-side refusals (e.g. attachment quota exhausted).
   return { isError: false, reply, attachments, failed, savedPaths,
+           blockedFeatures: Array.isArray(data.blockedFeatures) ? data.blockedFeatures : [],
            rawSample: data.rawSample, rawLen: data.rawLen };
 }
 
@@ -239,7 +243,7 @@ rl.on('line', async (line) => {
     if (r.isError) {
       text = r.text;
     } else {
-      const out = { reply: r.reply, attachments: r.attachments, failed: r.failed, savedPaths: r.savedPaths };
+      const out = { reply: r.reply, attachments: r.attachments, failed: r.failed, blockedFeatures: r.blockedFeatures || [], savedPaths: r.savedPaths };
       if (args.debug) { out.rawSample = r.rawSample || ''; out.rawLen = r.rawLen || 0; }
       text = JSON.stringify(out, null, 2);
     }

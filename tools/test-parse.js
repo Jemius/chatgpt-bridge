@@ -223,14 +223,69 @@ const cases = [
     name: 'cleanReplyText: filecite stripped inside a :::writing wrapper',
     clean: ':::writing{variant="document" id="2"}\n我已读到文件。\uE200filecite\uE204turn0file0\uE202L6-L10\uE201\n\n:::\n',
     expectClean: '我已读到文件。 \n\n'
+  },
+
+  // --- N-14: ChatGPT-side blocked_features must reach the caller -------------
+  // Real sample: attachment quota exhausted, carried inside a metadata frame.
+  {
+    name: 'blocked_features: quota block inside metadata frame is collected',
+    blockedBodies: [
+      frame({ p: '', o: 'add', v: { message: { author: { role: 'assistant' }, content: { parts: ['好的'] } },
+        conversation_detail_metadata: { blocked_features: [
+          { name: 'file_upload', resets_after: '2026-09-18T01:03:13Z', description: '你目前已用完附件额度。' }
+        ] } } })
+    ],
+    expectBlocked: [
+      { name: 'file_upload', resetsAfter: '2026-09-18T01:03:13Z', description: '你目前已用完附件额度。' }
+    ]
+  },
+  {
+    name: 'blocked_features: repeats of the same block collapse to one entry',
+    blockedBodies: [
+      frame({ p: '', o: 'add', v: { conversation_detail_metadata: { blocked_features: [
+        { name: 'file_upload', resets_after: '2026-09-18T01:03:13Z', description: '额度' }
+      ] } } }),
+      frame({ p: '/conversation/metadata', o: 'replace', v: { blocked_features: [
+        { name: 'file_upload', resets_after: '2026-09-18T01:03:13Z', description: '额度' }
+      ] } })
+    ],
+    expectBlocked: [
+      { name: 'file_upload', resetsAfter: '2026-09-18T01:03:13Z', description: '额度' }
+    ]
+  },
+  {
+    name: 'blocked_features: different names are both kept, text-only frames collect nothing',
+    blockedBodies: [
+      frame({ p: '', o: 'add', v: { conversation_detail_metadata: { blocked_features: [
+        { name: 'file_upload', resets_after: 'T1', description: 'a' },
+        { name: 'code_interpreter', resets_after: 'T2', description: 'b' }
+      ] } } }),
+      deltas(['1,2,3'])
+    ],
+    expectBlocked: [
+      { name: 'file_upload', resetsAfter: 'T1', description: 'a' },
+      { name: 'code_interpreter', resetsAfter: 'T2', description: 'b' }
+    ]
   }
 ];
 
 let pass = 0, fail = 0;
 for (const c of cases) {
   let got, err = null;
-  try { got = 'clean' in c ? api.cleanReplyText(c.clean) : run(c.bodies); } catch (e) { err = e; }
-  const expected = 'clean' in c ? c.expectClean : c.expect;
+  try {
+    if ('clean' in c) got = api.cleanReplyText(c.clean);
+    else if ('blockedBodies' in c) {
+      // Feed the bodies, then compare the blockedFeatures collected on the
+      // entry itself (N-14) — they travel on the entry, not through assemble.
+      const id = 'req-test-' + Math.random().toString(36).slice(2, 8);
+      const entry = api.entryFor(id);
+      for (const b of c.blockedBodies) api.mergeInto(entry, b);
+      got = JSON.stringify(entry.blockedFeatures || []);
+    }
+    else got = run(c.bodies);
+  } catch (e) { err = e; }
+  const expected = 'clean' in c ? c.expectClean
+    : ('blockedBodies' in c ? JSON.stringify(c.expectBlocked) : c.expect);
   const ok = !err && got === expected;
   if (ok) pass++; else fail++;
   console.log((ok ? 'PASS  ' : 'FAIL  ') + c.name);

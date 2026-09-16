@@ -131,9 +131,16 @@ Sends a message and returns a JSON object:
   "reply": "ChatGPT's reply as Markdown",
   "attachments": [{ "filename": "plan.md", "content": "# Plan\n..." }],
   "failed": [{ "filename": "x.md", "error": "attachment read timed out after 15000ms (canvas did not open or showed no new content; canvases before=1 after=1 newOrChanged=0)" }],
+  "blockedFeatures": [{ "name": "file_upload", "resetsAfter": "2026-09-18T01:03:13Z", "description": "你目前已用完附件额度。" }],
   "savedPaths": ["C:/docs/result.md", "C:/docs/plan.md"]
 }
 ```
+
+`blockedFeatures` is non-empty when ChatGPT itself blocked a feature for the
+account (typically the attachment quota: `"name": "file_upload"` with a
+`resetsAfter` timestamp and a human-readable `description`). Check it before
+assuming the model ignored an uploaded file or declined to produce one — the
+reply text alone looks like a normal answer in that case.
 
 | Arg | Description |
 |-----|-------------|

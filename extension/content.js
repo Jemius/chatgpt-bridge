@@ -48,7 +48,7 @@
   // survives an extension reload, so reloading the extension alone can leave an
   // OLD injected.js running in this tab. We fail loudly on that instead of
   // silently parsing with stale capture code.
-  const EXPECTED_PROTOCOL = '4';
+  const EXPECTED_PROTOCOL = '5';
   function protocolError() {
     let actual = null;
     try { actual = document.documentElement.getAttribute('data-bridge-protocol'); } catch (e) {}
@@ -567,9 +567,11 @@
       recordConversationId();
       // `debug` is opt-in per request (see relay): it hands the raw captured
       // stream back to the caller for diagnosing truncation/parse issues.
+      // blockedFeatures (N-14) always travels: it lets the caller tell a
+      // ChatGPT-side refusal (e.g. attachment quota) apart from silence.
       return request.debug
-        ? { markdown, attachments, failed, rawSample: net.rawSample || '', rawLen: net.rawLen || 0 }
-        : { markdown, attachments, failed };
+        ? { markdown, attachments, failed, blockedFeatures: net.blockedFeatures || [], rawSample: net.rawSample || '', rawLen: net.rawLen || 0 }
+        : { markdown, attachments, failed, blockedFeatures: net.blockedFeatures || [] };
     } catch (e) {
       try { clearComposer(); } catch (e2) {} // N-12: never leave a half-composed message + file behind
       return { error: e.message || String(e) };
