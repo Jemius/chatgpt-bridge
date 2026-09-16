@@ -194,6 +194,35 @@ const cases = [
     name: 'cleanReplyText: text without citations is untouched',
     clean: 'plain **markdown** — 中文 — stays untouched',
     expectClean: 'plain **markdown** — 中文 — stays untouched'
+  },
+
+  // --- N-9: the :::writing canvas directive wrapper must not leak ------------
+  // When the answer is produced in document/canvas mode the raw stream wraps
+  // the whole text in `:::writing{variant="document" id="…"}` … `:::`.
+  {
+    name: 'cleanReplyText: :::writing wrapper stripped, body kept',
+    clean: ':::writing{variant="document" id="58321"}\n\n# 标题\n\n正文段落。\n\n:::\n',
+    expectClean: '\n# 标题\n\n正文段落。\n\n'
+  },
+  {
+    name: 'cleanReplyText: :::writing opening without closing line (truncated stream)',
+    clean: ':::writing{variant="document" id="58321"}\n正文开头，流在此被截断。',
+    expectClean: '正文开头，流在此被截断。'
+  },
+  {
+    name: 'cleanReplyText: bare ::: line in a reply without :::writing is kept',
+    clean: '正常回复。\n\n:::\n\n上面那行是正文自己的分隔线，不是画布包装。',
+    expectClean: '正常回复。\n\n:::\n\n上面那行是正文自己的分隔线，不是画布包装。'
+  },
+  {
+    name: 'cleanReplyText: only the FIRST bare ::: after :::writing is consumed',
+    clean: ':::writing{variant="document" id="1"}\nA\n\n:::\n\nB\n\n:::\n',
+    expectClean: 'A\n\n\nB\n\n:::\n'
+  },
+  {
+    name: 'cleanReplyText: filecite stripped inside a :::writing wrapper',
+    clean: ':::writing{variant="document" id="2"}\n我已读到文件。\uE200filecite\uE204turn0file0\uE202L6-L10\uE201\n\n:::\n',
+    expectClean: '我已读到文件。 \n\n'
   }
 ];
 

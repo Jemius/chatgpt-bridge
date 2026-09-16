@@ -225,7 +225,12 @@ curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x
   an earlier request can never shadow a later capture. For a robust loop, ask
   ChatGPT to output the plan as plain text.
 - ChatGPT-internal citation markers (`filecite …` phrases wrapped in private-use
-  sentinel characters) are stripped from replies before delivery.
+  sentinel characters) are stripped from replies before delivery. The same
+  applies to the `:::writing{variant="document" …}` … `:::` canvas directive
+  wrapper that leaks into raw stream text when the answer is produced in
+  document/canvas mode: the wrapper lines are removed and the body is kept
+  (an edge case remains — a bare `:::writing{…}` line inside a fenced code
+  block in the reply body would be stripped too, which is not known to occur).
 - ChatGPT's frontend changes often. The reply path is network-based and more
   robust than DOM scraping — it survives class-name changes and handles both
   full-snapshot and `delta_encoding: v1` incremental streams — but any protocol

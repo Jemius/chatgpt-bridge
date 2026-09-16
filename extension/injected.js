@@ -162,8 +162,9 @@
     captures.delete(reqId);
     if (watching === reqId) watching = null;
 
-    // cleanReplyText strips ChatGPT-internal citation markers (filecite +
-    // private-use sentinel chars) that would otherwise leak into the Markdown.
+    // cleanReplyText strips ChatGPT-internal artifacts that would otherwise
+    // leak into the Markdown: citation markers (filecite + private-use
+    // sentinel chars) and the :::writing canvas directive wrapper (N-9).
     const reply = cleanReplyText(assemble(entry));
     postReply({
       type: 'reply',
@@ -317,9 +318,30 @@
   // trailing space is trimmed downstream by the content script).
   function cleanReplyText(text) {
     if (!text) return text;
-    return String(text)
+    return stripWritingWrapper(String(text)
       .replace(/[\uE000-\uF8FF]/g, ' ')
-      .replace(/ ?\bfilecite\s+turn\d+file\d+(?:\s+L\d+(?:-L?\d+)?)*/g, '');
+      .replace(/ ?\bfilecite\s+turn\d+file\d+(?:\s+L\d+(?:-L?\d+)?)*/g, ''));
+  }
+
+  // N-9: strip the ChatGPT-internal writing/canvas directive wrapper. When the
+  // answer is produced in document/canvas mode, the raw stream wraps the whole
+  // text in `:::writing{variant="document" id="…"}` … `:::`. The web page
+  // renders that as a canvas (users never see the markers), but the bridge
+  // would return them verbatim. Remove the opening line and the FIRST bare
+  // `:::` line after it (when present) — independent `:::` lines in a reply
+  // with no `:::writing` opening are legitimate content and stay untouched.
+  function stripWritingWrapper(text) {
+    const lines = String(text).split(/\r?\n/);
+    let openIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^ *:::writing\{/.test(lines[i])) { openIdx = i; break; }
+    }
+    if (openIdx === -1) return text;
+    let closeIdx = -1;
+    for (let i = openIdx + 1; i < lines.length; i++) {
+      if (/^ *::: *$/.test(lines[i])) { closeIdx = i; break; }
+    }
+    return lines.filter((_, i) => i !== openIdx && i !== closeIdx).join('\n');
   }
 
   // Poll for the content script's "watch" instruction (via a DOM attribute).

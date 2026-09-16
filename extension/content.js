@@ -48,7 +48,7 @@
   // survives an extension reload, so reloading the extension alone can leave an
   // OLD injected.js running in this tab. We fail loudly on that instead of
   // silently parsing with stale capture code.
-  const EXPECTED_PROTOCOL = '3';
+  const EXPECTED_PROTOCOL = '4';
   function protocolError() {
     let actual = null;
     try { actual = document.documentElement.getAttribute('data-bridge-protocol'); } catch (e) {}
