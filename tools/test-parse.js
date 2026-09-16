@@ -20,7 +20,7 @@ global.document = { documentElement: { setAttribute() {}, getAttribute() { retur
 global.window = global;
 
 const harness = 'let watching = null;\nconst captures = new Map();\n' + slice +
-  '\nreturn { entryFor, mergeInto, assemble, captures };';
+  '\nreturn { entryFor, mergeInto, assemble, cleanReplyText, captures };';
 const api = new Function(harness)();
 
 // ---- helpers ---------------------------------------------------------------
@@ -170,18 +170,43 @@ const cases = [
       messageEvent(FULL30)
     ],
     expect: FULL30
+  },
+
+  // --- N-2: ChatGPT-internal citation markers must not leak into the reply ---
+  // Real replies with uploaded files carried `filecite turn0file0 L6-L10`
+  // wrapped in private-use sentinel characters; both are stripped at assembly.
+  {
+    name: 'cleanReplyText: filecite marker with private-use sentinels is stripped',
+    clean: '我已读到文件内容，第三点的关键词是「蓝鲸协议」。\uE200filecite\uE204turn0file0\uE202L6-L10\uE201',
+    expectClean: '我已读到文件内容，第三点的关键词是「蓝鲸协议」。 '
+  },
+  {
+    name: 'cleanReplyText: plain citation phrase between words is removed',
+    clean: 'before filecite turn0file0 L6-L10 after',
+    expectClean: 'before after'
+  },
+  {
+    name: 'cleanReplyText: multiple locators stripped, leading text kept',
+    clean: 'filecite turn0file0 L6-L10 L12-L20 tail',
+    expectClean: ' tail'
+  },
+  {
+    name: 'cleanReplyText: text without citations is untouched',
+    clean: 'plain **markdown** — 中文 — stays untouched',
+    expectClean: 'plain **markdown** — 中文 — stays untouched'
   }
 ];
 
 let pass = 0, fail = 0;
 for (const c of cases) {
   let got, err = null;
-  try { got = run(c.bodies); } catch (e) { err = e; }
-  const ok = !err && got === c.expect;
+  try { got = 'clean' in c ? api.cleanReplyText(c.clean) : run(c.bodies); } catch (e) { err = e; }
+  const expected = 'clean' in c ? c.expectClean : c.expect;
+  const ok = !err && got === expected;
   if (ok) pass++; else fail++;
   console.log((ok ? 'PASS  ' : 'FAIL  ') + c.name);
   if (!ok) {
-    console.log('        expected: ' + JSON.stringify(c.expect));
+    console.log('        expected: ' + JSON.stringify(expected));
     console.log('        actual  : ' + JSON.stringify(err ? 'THREW ' + err.message : got));
   }
 }

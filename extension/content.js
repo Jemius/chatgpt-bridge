@@ -48,7 +48,7 @@
   // survives an extension reload, so reloading the extension alone can leave an
   // OLD injected.js running in this tab. We fail loudly on that instead of
   // silently parsing with stale capture code.
-  const EXPECTED_PROTOCOL = '2';
+  const EXPECTED_PROTOCOL = '3';
   function protocolError() {
     let actual = null;
     try { actual = document.documentElement.getAttribute('data-bridge-protocol'); } catch (e) {}
@@ -344,28 +344,65 @@
     return '';
   }
 
-  // Find every "document" card in the reply (e.g. 琵琶行.md), click to open it,
-  // and read its content from the Canvas editor.
-  async function captureArtifacts(timeoutMs) {
-    const seen = new Set();
-    document.querySelectorAll('button[aria-label$=".md"], button[class*="peer/open-file"]').forEach((b) => seen.add(b));
-    const btns = [...seen];
-    if (!btns.length) return { attachments: [], failed: [] };
+  // Resolve an artifact card's display filename. The aria-label is verified
+  // clean ("checkpoint.md"); when it is missing, fall back to the card text if
+  // it names a .md file, else a generic name.
+  function artifactFilename(btn) {
+    const label = (btn.getAttribute('aria-label') || '').trim();
+    if (label) return label;
+    const text = (btn.textContent || '').trim();
+    return (/\.md\b/i.test(text) && text.length <= 200) ? text : 'document.md';
+  }
 
-    const perFileTimeout = Math.max(5000, Math.min(15000, Math.floor(timeoutMs / Math.max(btns.length, 1))));
+  // Cards inside a user message are the user's own uploads, not ChatGPT
+  // artifacts — clicking them never yields Canvas content and used to produce
+  // a fake "read failed" entry for every upload. Cards with no author-role
+  // ancestor keep the old capture attempt (safe default).
+  function isUserArtifact(btn) {
+    try { return !!(btn.closest && btn.closest('[data-message-author-role="user"]')); }
+    catch (e) { return false; }
+  }
+
+  // Pick capture targets from the matched card buttons. One file card can
+  // surface as TWO distinct buttons (the aria-label chip and the peer/open-file
+  // card), so the same file used to be clicked twice: the second read saw
+  // content identical to the first, spun out its whole timeout, and landed in
+  // `failed` — a misleading error sitting right next to the successful
+  // capture. Dedup by resolved filename; nameless buttons stay one-per-node.
+  function collectArtifactTargets(nodes, api) {
+    const byName = new Map();
+    const unnamed = [];
+    for (const b of nodes) {
+      if (api.isUserArtifact(b)) continue;
+      const name = api.artifactFilename(b);
+      if (name === 'document.md') { unnamed.push({ btn: b, filename: name }); continue; }
+      if (!byName.has(name)) byName.set(name, { btn: b, filename: name });
+    }
+    return [...byName.values(), ...unnamed];
+  }
+
+  // Find every "document" card in the reply (e.g. 琵琶行.md), click to open it,
+  // and read its content from the Canvas editor — one click per unique file.
+  async function captureArtifacts(timeoutMs) {
+    const targets = collectArtifactTargets(
+      document.querySelectorAll('button[aria-label$=".md"], button[class*="peer/open-file"]'),
+      { artifactFilename, isUserArtifact }
+    );
+    if (!targets.length) return { attachments: [], failed: [] };
+
+    const perFileTimeout = Math.max(5000, Math.min(15000, Math.floor(timeoutMs / Math.max(targets.length, 1))));
     const attachments = [];
     const failed = [];
     let prev = '';
 
-    for (const btn of btns) {
-      const filename = (btn.getAttribute('aria-label') || '').trim() || 'document.md';
+    for (const { btn, filename } of targets) {
       btn.click();
       const md = await waitForCanvasMarkdown(perFileTimeout, prev);
       if (md) {
         attachments.push({ filename, content: md });
         prev = md;
       } else {
-        failed.push({ filename, error: 'attachment read timed out or was empty' });
+        failed.push({ filename, error: 'attachment read timed out (canvas did not open or showed no new content)' });
       }
     }
     return { attachments, failed };

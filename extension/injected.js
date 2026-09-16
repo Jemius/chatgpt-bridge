@@ -51,7 +51,7 @@
   // inside an open tab. The version attribute lets the content script detect
   // that stale state and fail loudly ("refresh the ChatGPT page") instead of
   // silently parsing with old capture code.
-  const PROTOCOL = 2;
+  const PROTOCOL = 3;
   function exposeProtocol() {
     const el = document.documentElement;
     if (!el) { setTimeout(exposeProtocol, 0); return; }
@@ -162,7 +162,9 @@
     captures.delete(reqId);
     if (watching === reqId) watching = null;
 
-    const reply = assemble(entry);
+    // cleanReplyText strips ChatGPT-internal citation markers (filecite +
+    // private-use sentinel chars) that would otherwise leak into the Markdown.
+    const reply = cleanReplyText(assemble(entry));
     postReply({
       type: 'reply',
       requestId: reqId,
@@ -305,6 +307,19 @@
   function partIndex(path) {
     const m = /\/parts\/(\d+)$/.exec(path);
     return m ? Number(m[1]) : 0;
+  }
+
+  // Strip ChatGPT-internal citation markers that leak into the Markdown reply
+  // (observed with uploaded files): private-use sentinel characters wrapped
+  // around a `filecite turn<N>file<N> [L<A>-L<B> …]` phrase. Private-use chars
+  // are never legitimate content, so they become spaces; the citation phrase
+  // itself is removed along with at most one leading space (any leftover
+  // trailing space is trimmed downstream by the content script).
+  function cleanReplyText(text) {
+    if (!text) return text;
+    return String(text)
+      .replace(/[\uE000-\uF8FF]/g, ' ')
+      .replace(/ ?\bfilecite\s+turn\d+file\d+(?:\s+L\d+(?:-L?\d+)?)*/g, '');
   }
 
   // Poll for the content script's "watch" instruction (via a DOM attribute).

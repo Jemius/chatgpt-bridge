@@ -40,7 +40,7 @@ carries the usual automation risks (see **Disclaimer**).
 | Extension background | `extension/background.js` | WebSocket client; routes requests to the ChatGPT tab. |
 | Extension content | `extension/content.js` | DOM automation: paste message, submit, capture attachments. |
 | Extension injected | `extension/injected.js` | MAIN-world script that hooks `fetch` to read the streaming reply. |
-| Tools | `tools/` | `test-parse.js` (unit tests, `npm test`), `ask.js` / `ask-debug.js` (CLI helpers for testing the bridge end-to-end). |
+| Tools | `tools/` | `test-parse.js` + `test-artifacts.js` (unit tests, `npm test`), `ask.js` / `ask-debug.js` (CLI helpers for testing the bridge end-to-end). |
 
 The key design decision: the **reply is read from the network layer** (by
 intercepting ChatGPT's `fetch` calls) rather than by scraping page class names,
@@ -130,7 +130,7 @@ Sends a message and returns a JSON object:
 {
   "reply": "ChatGPT's reply as Markdown",
   "attachments": [{ "filename": "plan.md", "content": "# Plan\n..." }],
-  "failed": [{ "filename": "x.md", "error": "attachment read timed out" }],
+  "failed": [{ "filename": "x.md", "error": "attachment read timed out (canvas did not open or showed no new content)" }],
   "savedPaths": ["C:/docs/result.md", "C:/docs/plan.md"]
 }
 ```
@@ -218,8 +218,11 @@ curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x
   some ChatGPT versions reject. Prefer sending results as text.
 - **Canvas document attachments** (when ChatGPT generates a real `.md` file) are
   captured best-effort by reading the canvas editor; this can also break when
-  ChatGPT changes its DOM. For a robust loop, ask ChatGPT to output the plan as
-  plain text.
+  ChatGPT changes its DOM. Each file is clicked once (targets are deduplicated
+  by filename) and cards inside your own message — i.e. files you uploaded —
+  are skipped. For a robust loop, ask ChatGPT to output the plan as plain text.
+- ChatGPT-internal citation markers (`filecite …` phrases wrapped in private-use
+  sentinel characters) are stripped from replies before delivery.
 - ChatGPT's frontend changes often. The reply path is network-based and more
   robust than DOM scraping — it survives class-name changes and handles both
   full-snapshot and `delta_encoding: v1` incremental streams — but any protocol
