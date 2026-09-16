@@ -68,6 +68,21 @@
     return null;
   }
 
+  // One-line state snapshot for the "composer not found" error, so a failure
+  // report can tell page-state problems (canvas/library/settings view, reader
+  // page, Cloudflare interstitial) apart from a real selector breakage. Every
+  // probe is wrapped — diagnostics must never throw on their own.
+  function composerDiagnostics() {
+    const parts = [];
+    const probe = (name, fn) => { try { parts.push(name + '=' + fn()); } catch (e) {} };
+    probe('url', () => location.pathname);
+    probe('title', () => '"' + String(document.title || '').slice(0, 80) + '"');
+    probe('editable', () => document.querySelectorAll('div[contenteditable="true"],textarea').length);
+    probe('promptTextarea', () => document.querySelectorAll('#prompt-textarea').length);
+    probe('loginLink', () => document.querySelectorAll(SELECTORS.login.join(',')).length);
+    return parts.join(' ');
+  }
+
   // Wait for the composer to be ready (or fail fast with a clear error).
   async function ensureReady() {
     const deadline = Date.now() + 15000;
@@ -76,7 +91,7 @@
       if ($(SELECTORS.editor)) return true;
       await sleep(300);
     }
-    throw new Error('ChatGPT composer not found — make sure the page is fully loaded.');
+    throw new Error('ChatGPT composer not found — make sure the page is fully loaded. Diagnostics: ' + composerDiagnostics());
   }
 
   // Start a new conversation (used for `conversation: "new"`). Verified: we
