@@ -54,6 +54,33 @@ function loadConfig() {
   } catch (e) {}
 }
 
+// Send the connect handshake: extension version + expected capture protocol.
+// The relay surfaces both via /health, so "which build is running" stops being
+// a five-path investigation. `chrome.runtime.getManifest()` is always available
+// in the service worker; the protocol value comes from chrome.storage (written
+// by content.js at injection time, since content.js owns EXPECTED_PROTOCOL).
+// If storage is slow or the socket died meanwhile we fall back to a
+// version-only hello — old relays ignore the extra fields, new relays show
+// nulls as "not reported".
+function sendHello(sock) {
+  let version = null;
+  try { version = chrome.runtime.getManifest().version; } catch (e) {}
+  try {
+    chrome.storage.local.get({ extProtocol: null }, (r) => {
+      try {
+        if (sock.readyState !== WebSocket.OPEN) return;
+        sock.send(JSON.stringify({ type: 'hello', version, protocol: r.extProtocol || null }));
+      } catch (e) {}
+    });
+  } catch (e) {
+    try {
+      if (sock.readyState === WebSocket.OPEN) {
+        sock.send(JSON.stringify({ type: 'hello', version, protocol: null }));
+      }
+    } catch (e2) {}
+  }
+}
+
 function ensureWs() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   let sock;
@@ -68,7 +95,7 @@ function ensureWs() {
   sock.onopen = () => {
     backoffMs = 1000; // connection succeeded — reset the backoff
     flushOutbound();
-    try { sock.send(JSON.stringify({ type: 'hello' })); } catch (e) {}
+    sendHello(sock);
   };
   sock.onmessage = (e) => {
     let msg;

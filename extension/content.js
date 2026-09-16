@@ -49,6 +49,12 @@
   // OLD injected.js running in this tab. We fail loudly on that instead of
   // silently parsing with stale capture code.
   const EXPECTED_PROTOCOL = '5';
+
+  // v1.2.11: publish the expected protocol so the service worker can include it
+  // in its WS `hello` handshake (surfaced via the relay's /health endpoint).
+  // Fire-and-forget: purely informational, never gates anything.
+  try { chrome.storage.local.set({ extProtocol: EXPECTED_PROTOCOL }); } catch (e) {}
+
   function protocolError() {
     let actual = null;
     try { actual = document.documentElement.getAttribute('data-bridge-protocol'); } catch (e) {}

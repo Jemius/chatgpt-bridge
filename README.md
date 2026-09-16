@@ -40,7 +40,7 @@ carries the usual automation risks (see **Disclaimer**).
 | Extension background | `extension/background.js` | WebSocket client; routes requests to the ChatGPT tab. |
 | Extension content | `extension/content.js` | DOM automation: paste message, submit, capture attachments. |
 | Extension injected | `extension/injected.js` | MAIN-world script that hooks `fetch` to read the streaming reply. |
-| Tools | `tools/` | `test-parse.js` + `test-artifacts.js` + `test-protocol.js` + `test-netdiag.js` (unit tests incl. the cross-file protocol-version pair check, `npm test`), `ask.js` / `ask-debug.js` (CLI helpers for testing the bridge end-to-end). |
+| Tools | `tools/` | `test-parse.js` + `test-artifacts.js` + `test-protocol.js` + `test-netdiag.js` + `test-health.js` (unit tests incl. the cross-file protocol-version pair check and a spawn-a-relay `/health` integration test, `npm test`), `ask.js` / `ask-debug.js` (CLI helpers for testing the bridge end-to-end). |
 
 The key design decision: the **reply is read from the network layer** (by
 intercepting ChatGPT's `fetch` calls) rather than by scraping page class names,
@@ -200,6 +200,14 @@ curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x
 
 ## Troubleshooting
 
+- **"Which build is actually running?"** — `curl http://127.0.0.1:8742/health`
+  answers it directly (v1.2.11+). `relay.version` is the relay build (read from
+  package.json at startup); `extension.version` / `extension.protocol` /
+  `extension.seenAt` are the last identity the extension reported in its WS
+  `hello` handshake. Null extension fields mean a pre-1.2.11 extension (or
+  nothing) has connected since the relay started. The identity intentionally
+  survives a disconnect — "last known" beats "unknown" — so reload the
+  extension (and reconnect) to refresh it.
 - **`no browser extension connected`** — the relay has no WebSocket client. Load
   the extension and open/log in to chatgpt.com; confirm the relay logged
   `extension connected`.

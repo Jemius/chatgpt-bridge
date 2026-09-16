@@ -54,6 +54,16 @@ const clients = new Set();
 // In-flight requests: requestId -> { resolve, timer }.
 const pending = new Map();
 
+// Relay version, read once from package.json. Shown in /health so a caller can
+// tell at a glance WHICH relay build is running (the most expensive unknown
+// during past debugging rounds).
+const RELAY_VERSION = require('../package.json').version;
+
+// Last reported extension identity from the WS `hello` handshake. Null fields
+// mean "an extension connected that does not send version info yet" (pre-1.2.11
+// builds). Kept after disconnect on purpose: "last known" beats "unknown".
+let extInfo = { version: null, protocol: null, seenAt: null };
+
 function sendJson(res, status, obj) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(obj));
@@ -112,7 +122,13 @@ const server = http.createServer((req, res) => {
   if (!checkHttpAuth(req, res)) return;
 
   if (req.method === 'GET' && req.url === '/health') {
-    return sendJson(res, 200, { ok: true, clients: clients.size, pending: pending.size });
+    return sendJson(res, 200, {
+      ok: true,
+      clients: clients.size,
+      pending: pending.size,
+      relay: { version: RELAY_VERSION },
+      extension: extInfo
+    });
   }
 
   if (req.method === 'POST' && req.url === '/api/chat') {
@@ -257,6 +273,19 @@ wss.on('connection', (ws) => {
   ws.on('message', (data) => {
     let msg;
     try { msg = JSON.parse(data.toString()); } catch { return; }
+
+    if (msg.type === 'hello') {
+      // v1.2.11: the extension reports its own version (and the capture
+      // protocol it expects) on connect, so /health can answer "which build
+      // is running". Old extensions send {type:'hello'} only — fields stay null.
+      extInfo = {
+        version: typeof msg.version === 'string' ? msg.version : null,
+        protocol: msg.protocol == null ? null : String(msg.protocol),
+        seenAt: Date.now()
+      };
+      console.log(`[relay] extension hello: version=${extInfo.version} protocol=${extInfo.protocol}`);
+      return;
+    }
 
     if (msg.type === 'result' || msg.type === 'error') {
       const p = pending.get(msg.id);
