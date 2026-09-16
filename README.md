@@ -219,8 +219,11 @@ curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x
 - **Canvas document attachments** (when ChatGPT generates a real `.md` file) are
   captured best-effort by reading the canvas editor; this can also break when
   ChatGPT changes its DOM. Each file is clicked once (targets are deduplicated
-  by filename) and cards inside your own message — i.e. files you uploaded —
-  are skipped. For a robust loop, ask ChatGPT to output the plan as plain text.
+  by filename), cards inside your own message — i.e. files you uploaded — are
+  skipped, and every read is bound to its click: only a canvas that is new or
+  changed relative to the pre-click snapshot counts, so a canvas left open by
+  an earlier request can never shadow a later capture. For a robust loop, ask
+  ChatGPT to output the plan as plain text.
 - ChatGPT-internal citation markers (`filecite …` phrases wrapped in private-use
   sentinel characters) are stripped from replies before delivery.
 - ChatGPT's frontend changes often. The reply path is network-based and more

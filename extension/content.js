@@ -324,21 +324,41 @@
   // Reads the Canvas editor (a ProseMirror element with class `markdown`),
   // preserving headings/lists/tables/code blocks via extractMarkdown rather
   // than the flattened innerText.
-  function readCanvasMarkdown() {
+  //
+  // A canvas left open by a PREVIOUS request stays in the DOM. Reading "the
+  // first non-empty canvas" then silently attributed that stale text to every
+  // later file capture — the right filename with unrelated content and no
+  // error signal (the N-7 bug). The read is therefore bound to each click: a
+  // pre-click snapshot records every open canvas node and its text; after the
+  // click only a NEW canvas node, or a node whose text CHANGED relative to
+  // that snapshot, counts as the answer.
+  function snapshotCanvases() {
+    const before = new Map();
+    for (const el of document.querySelectorAll('div.ProseMirror.markdown')) {
+      before.set(el, extractMarkdown(el).trim());
+    }
+    return before;
+  }
+
+  function readCanvasMarkdownExcluding(before) {
     for (const el of document.querySelectorAll('div.ProseMirror.markdown')) {
       const md = extractMarkdown(el).trim();
-      if (md) return md;
+      if (!md) continue;
+      if (before && before.has(el) && before.get(el) === md) continue;
+      return md;
     }
     return '';
   }
 
-  // Wait for the Canvas editor to show content different from `previous`, so a
-  // multi-file reply doesn't re-read the previous file.
-  async function waitForCanvasMarkdown(timeoutMs, previous) {
+  // Wait for a canvas that is new or changed relative to the pre-click
+  // snapshot `before`. An unchanged stale canvas never qualifies, and a click
+  // that failed to open anything times out honestly instead of returning
+  // unrelated text.
+  async function waitForCanvasMarkdown(timeoutMs, before) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      const md = readCanvasMarkdown();
-      if (md && md !== previous) return md;
+      const md = readCanvasMarkdownExcluding(before);
+      if (md) return md;
       await sleep(300);
     }
     return '';
@@ -382,7 +402,8 @@
   }
 
   // Find every "document" card in the reply (e.g. 琵琶行.md), click to open it,
-  // and read its content from the Canvas editor — one click per unique file.
+  // and read its content from the Canvas editor — one click per unique file,
+  // each read bound to its own pre-click snapshot (see snapshotCanvases above).
   async function captureArtifacts(timeoutMs) {
     const targets = collectArtifactTargets(
       document.querySelectorAll('button[aria-label$=".md"], button[class*="peer/open-file"]'),
@@ -393,14 +414,13 @@
     const perFileTimeout = Math.max(5000, Math.min(15000, Math.floor(timeoutMs / Math.max(targets.length, 1))));
     const attachments = [];
     const failed = [];
-    let prev = '';
 
     for (const { btn, filename } of targets) {
+      const before = snapshotCanvases();
       btn.click();
-      const md = await waitForCanvasMarkdown(perFileTimeout, prev);
+      const md = await waitForCanvasMarkdown(perFileTimeout, before);
       if (md) {
         attachments.push({ filename, content: md });
-        prev = md;
       } else {
         failed.push({ filename, error: 'attachment read timed out (canvas did not open or showed no new content)' });
       }
