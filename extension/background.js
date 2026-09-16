@@ -17,45 +17,110 @@ const DEFAULT_RELAY_URL = 'ws://127.0.0.1:8742/ws';
 let relayUrl = DEFAULT_RELAY_URL;
 
 let ws = null;
+let reconnectTimer = null;
+let backoffMs = 1000;
 
-// Read the (optional) relay URL override from chrome.storage.local.
-// Change it from the service-worker console with:
-//   chrome.storage.local.set({ relayUrl: 'ws://127.0.0.1:9000/ws' })
+// Optional shared secret. Must match BRIDGE_TOKEN on the relay. Browser
+// WebSockets cannot set headers, so it is appended to the WS URL as ?token=.
+let bridgeToken = '';
+
+// Results that could not be delivered because the socket was down. The relay
+// keeps requests pending in a map (it does not tie a request to a socket), so
+// a late answer after a reconnect is still accepted. Bounded to the 20 most
+// recent results.
+const outboundQueue = new Map(); // id -> serialized payload
+
+// Build the connect URL, attaching the token when one is configured.
+function wsUrl() {
+  if (!bridgeToken) return relayUrl;
+  return relayUrl + (relayUrl.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(bridgeToken);
+}
+
+// Read the (optional) relay URL and token from chrome.storage.local.
+// Change them from the service-worker console with:
+//   chrome.storage.local.set({ relayUrl: 'ws://127.0.0.1:9000/ws', bridgeToken: 'secret' })
 function loadConfig() {
   try {
-    chrome.storage.local.get({ relayUrl: DEFAULT_RELAY_URL }, (r) => {
-      if (r.relayUrl && r.relayUrl !== relayUrl) {
-        relayUrl = r.relayUrl;
-        if (ws) { try { ws.close(); } catch (e) {} }
-        ws = null;
-        ensureWs();
-      }
+    chrome.storage.local.get({ relayUrl: DEFAULT_RELAY_URL, bridgeToken: '' }, (r) => {
+      const urlChanged = r.relayUrl && r.relayUrl !== relayUrl;
+      const tokenChanged = (r.bridgeToken || '') !== bridgeToken;
+      if (!urlChanged && !tokenChanged) return;
+      relayUrl = r.relayUrl || DEFAULT_RELAY_URL;
+      bridgeToken = r.bridgeToken || '';
+      if (ws) { try { ws.close(); } catch (e) {} }
+      ws = null;
+      ensureWs();
     });
   } catch (e) {}
 }
 
 function ensureWs() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  let sock;
   try {
-    ws = new WebSocket(relayUrl);
+    sock = new WebSocket(wsUrl());
   } catch (e) {
     ws = null;
+    scheduleReconnect();
     return;
   }
-  ws.onopen = () => { try { ws.send(JSON.stringify({ type: 'hello' })); } catch (e) {} };
-  ws.onmessage = (e) => {
+  ws = sock;
+  sock.onopen = () => {
+    backoffMs = 1000; // connection succeeded — reset the backoff
+    flushOutbound();
+    try { sock.send(JSON.stringify({ type: 'hello' })); } catch (e) {}
+  };
+  sock.onmessage = (e) => {
     let msg;
     try { msg = JSON.parse(e.data); } catch { return; }
     if (msg.type === 'chat') handleChat(msg);
   };
-  ws.onclose = () => { ws = null; };
-  ws.onerror = () => { try { ws.close(); } catch (e) {} ws = null; };
+  // The handlers close over `sock`, NOT the module-level `ws`. A stale socket's
+  // close event (e.g. fired right after a config-driven reconnect) must not
+  // clear the NEW connection's slot — that used to orphan the live connection
+  // and made ensureWs() open duplicates.
+  sock.onclose = () => {
+    if (ws === sock) { ws = null; scheduleReconnect(); }
+  };
+  sock.onerror = () => {
+    try { sock.close(); } catch (e) {}
+    if (ws === sock) { ws = null; scheduleReconnect(); }
+  };
+}
+
+// Exponential backoff with jitter: reconnect quickly after a relay restart.
+// (The 30s chrome.alarms fallback alone left a dead window of up to a minute —
+// and the minimum alarm period is even longer in packed extensions.)
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  const delay = backoffMs + Math.floor(Math.random() * 300);
+  backoffMs = Math.min(backoffMs * 2, 30000);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    ensureWs();
+  }, delay);
 }
 
 function respond(id, obj) {
+  const payload = JSON.stringify(Object.assign({ id }, obj));
   if (ws && ws.readyState === WebSocket.OPEN) {
-    try { ws.send(JSON.stringify(Object.assign({ id }, obj))); } catch (e) {}
+    try { ws.send(payload); outboundQueue.delete(id); return; } catch (e) {}
   }
+  // Socket down (reconnecting): buffer instead of silently dropping — the
+  // caller would otherwise wait the full relay timeout for a result that
+  // already exists.
+  outboundQueue.set(id, payload);
+  if (outboundQueue.size > 20) {
+    outboundQueue.delete(outboundQueue.keys().next().value);
+  }
+}
+
+function flushOutbound() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  for (const payload of outboundQueue.values()) {
+    try { ws.send(payload); } catch (e) {}
+  }
+  outboundQueue.clear();
 }
 
 // Wait for a tab to finish loading after a navigation (used by session binding).
@@ -121,13 +186,26 @@ async function handleChat(msg) {
     message: msg.message,
     conversation: msg.conversation,
     timeoutMs: msg.timeoutMs,
-    file: msg.file
+    deadline: msg.deadline, // absolute relay deadline, budgeted against in content.js
+    file: msg.file,
+    // `debug` makes the content script return the raw captured stream so a
+    // caller can diagnose truncation/parse issues.
+    debug: !!msg.debug
   };
 
   try {
     const r = await sendToTab(tab.id, payload);
     if (r && r.error) respond(msg.id, { type: 'error', error: r.error });
-    else respond(msg.id, { type: 'result', markdown: (r && r.markdown) || '', attachments: (r && r.attachments) || [], failed: (r && r.failed) || [] });
+    else {
+      respond(msg.id, {
+        type: 'result',
+        markdown: (r && r.markdown) || '',
+        attachments: (r && r.attachments) || [],
+        failed: (r && r.failed) || [],
+        rawSample: (r && r.rawSample) || undefined,
+        rawLen: (r && r.rawLen) || undefined
+      });
+    }
   } catch (e) {
     respond(msg.id, { type: 'error', error: 'content script not ready — reload the ChatGPT tab. (' + (e.message || e) + ')' });
   }
@@ -151,12 +229,19 @@ try { chrome.alarms.create('ping', { periodInMinutes: 0.5 }); } catch (e) {}
 
 try {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.relayUrl) loadConfig();
+    if (area === 'local' && (changes.relayUrl || changes.bridgeToken)) loadConfig();
   });
 } catch (e) {}
 
 chrome.runtime.onStartup.addListener(ensureWs);
-chrome.runtime.onInstalled.addListener(ensureWs);
+chrome.runtime.onInstalled.addListener(() => {
+  ensureWs();
+  // MAIN-world injected.js survives extension reloads inside open tabs (its
+  // guard lives on the page's window). The content script detects that stale
+  // state via the data-bridge-protocol version handshake and fails with a
+  // clear message instead of silently mis-parsing — this log is the heads-up.
+  console.warn('[chatgpt-bridge] extension (re)installed — refresh open ChatGPT tabs (F5) so injected.js picks up the new capture code.');
+});
 chrome.alarms.onAlarm.addListener((a) => {
   if (a.name !== 'ping') return;
   ensureWs();

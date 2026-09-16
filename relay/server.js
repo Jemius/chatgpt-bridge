@@ -16,18 +16,31 @@
 //           → ChatGPT (via DOM automation + network interception) → Markdown
 //           → back through the same chain.
 //
-// Security note: this relay has NO authentication and listens on 127.0.0.1 by
-// default. It is intended for personal, single-machine use only. Do not bind it
-// to a public interface (see the README "Security" section).
+// Security: the relay only accepts loopback-bound requests from the local
+// machine. Because browsers let ANY webpage send requests to 127.0.0.1
+// (WebSockets and simple POSTs are not subject to CORS), the relay enforces
+// three cheap defenses — see the "Access control" block below:
+//   1. Host header must be loopback (blocks DNS rebinding).
+//   2. Requests carrying an Origin must come from a browser extension
+//      (blocks web-page CSRF; curl/Node clients send no Origin at all).
+//   3. Optional shared secret via the BRIDGE_TOKEN env var.
 const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8742);
 
+// Optional shared secret. When set, HTTP clients must send it as the
+// `x-bridge-token` header and the extension must append `?token=` to the WS URL.
+const TOKEN = process.env.BRIDGE_TOKEN || '';
+
 // Maximum accepted request body size (10 MB). Protects the relay from a local
 // process (or webpage) that floods it with a huge body.
 const MAX_BODY = 10 * 1024 * 1024;
+
+// Maximum size of a single chat message pasted into the editor (200 KB). Very
+// long content belongs in a .md file attachment, not in the composer.
+const MAX_MESSAGE = 200 * 1024;
 
 // Maximum wait time for a single chat request (10 minutes). Prevents a stuck
 // request from holding memory/connections forever.
@@ -47,7 +60,8 @@ function sendJson(res, status, obj) {
 }
 
 // Reject every pending request with the given error. Called when the last
-// extension disconnects and does not reconnect within the grace period.
+// extension disconnects and does not reconnect within the grace period, and on
+// graceful shutdown.
 function failAllPending(error) {
   for (const [id, p] of pending) {
     pending.delete(id);
@@ -56,10 +70,46 @@ function failAllPending(error) {
   }
 }
 
+// ---- Access control --------------------------------------------------------
+// The HOST header check only applies when the relay is actually bound to a
+// loopback address (the default); a deliberately LAN-bound relay stays usable.
+const HOST_IS_LOOPBACK = /^(127\.|localhost|\[::1\]|::1)/i.test(HOST);
+
+function isLoopbackHost(host) {
+  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host || '');
+}
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true;                       // non-browser client (curl, Node, ...)
+  if (origin === 'null') return false;            // sandboxed iframe / opaque origin
+  return /^chrome-extension:\/\//i.test(origin);  // only our own extension
+}
+
+function rejectHttp(res, error) {
+  sendJson(res, 403, { ok: false, error });
+  return false;
+}
+
+// Gate for the HTTP endpoints. Returns true when the request may proceed.
+function checkHttpAuth(req, res) {
+  if (HOST_IS_LOOPBACK && !isLoopbackHost(req.headers.host)) {
+    return rejectHttp(res, 'forbidden: Host header is not loopback (DNS-rebinding protection)');
+  }
+  if (!isAllowedOrigin(req.headers.origin)) {
+    return rejectHttp(res, 'forbidden: web pages may not call this API');
+  }
+  if (TOKEN && req.headers['x-bridge-token'] !== TOKEN) {
+    return rejectHttp(res, 'forbidden: missing or wrong x-bridge-token header (set BRIDGE_TOKEN, see README)');
+  }
+  return true;
+}
+
 const server = http.createServer((req, res) => {
   // Prevent an aborted/invalid client connection from crashing the process.
   req.on('error', () => {});
   res.on('error', () => {});
+
+  if (!checkHttpAuth(req, res)) return;
 
   if (req.method === 'GET' && req.url === '/health') {
     return sendJson(res, 200, { ok: true, clients: clients.size, pending: pending.size });
@@ -79,7 +129,9 @@ const server = http.createServer((req, res) => {
       if (size > MAX_BODY) {
         tooLarge = true;
         sendJson(res, 413, { ok: false, error: 'request body too large' });
-        req.destroy();
+        // Tear the connection down only AFTER the 413 has been flushed, so the
+        // client actually receives the error instead of a connection reset.
+        res.on('finish', () => { try { req.destroy(); } catch {} });
         return;
       }
       chunks.push(chunk);
@@ -97,6 +149,12 @@ const server = http.createServer((req, res) => {
 
       const message = String(input.message || '');
       if (!message) return sendJson(res, 400, { ok: false, error: 'message is required' });
+      if (message.length > MAX_MESSAGE) {
+        return sendJson(res, 413, {
+          ok: false,
+          error: `message too large (${message.length} chars, max ${MAX_MESSAGE}) — send long content as a .md file attachment instead`
+        });
+      }
 
       console.log(`[relay] chat request: ${JSON.stringify(message).slice(0, 80)} (clients=${clients.size})`);
       if (clients.size === 0) {
@@ -121,8 +179,15 @@ const server = http.createServer((req, res) => {
           id,
           message,
           timeoutMs,
+          // Absolute deadline (relay clock). The extension budgets ALL of its
+          // remaining phases (reply wait + attachment capture) against this, so
+          // it always answers before the relay gives up.
+          deadline: Date.now() + timeoutMs,
           file: input.file, // optional .md file to upload (see MCP `file` arg)
-          conversation: input.conversation === 'new' ? 'new' : 'continue'
+          conversation: input.conversation === 'new' ? 'new' : 'continue',
+          // `debug: true` makes the extension return the raw captured stream
+          // alongside the parsed reply — for diagnosing truncation/parse issues.
+          debug: !!input.debug
         });
 
         // Deliver to a single client to avoid duplicate sends when multiple
@@ -158,7 +223,32 @@ server.on('error', (err) => {
   }
 });
 
-const wss = new WebSocketServer({ server, path: '/ws' });
+// The handshake is handled manually so we can reject non-extension clients:
+// browsers do not apply CORS to WebSockets, so any webpage could otherwise
+// connect to ws://127.0.0.1:8742/ws and impersonate the extension (and with
+// single-client delivery, even intercept the message stream).
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (req, socket, head) => {
+  const reject = () => {
+    try { socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); } catch {}
+    socket.destroy();
+  };
+
+  let url;
+  try { url = new URL(req.url || '/', 'http://localhost'); } catch { return reject(); }
+  if (url.pathname !== '/ws') return reject();
+  if (HOST_IS_LOOPBACK && !isLoopbackHost(req.headers.host)) return reject();
+  if (!isAllowedOrigin(req.headers.origin)) return reject();
+  // Browser WebSockets cannot set custom headers, so the extension
+  // authenticates with a `?token=` query parameter instead. Header-based auth
+  // is accepted too (for non-browser WS clients). Ignored when TOKEN is empty.
+  if (TOKEN && url.searchParams.get('token') !== TOKEN && req.headers['x-bridge-token'] !== TOKEN) {
+    return reject();
+  }
+
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+});
 
 wss.on('connection', (ws) => {
   clients.add(ws);
@@ -178,7 +268,10 @@ wss.on('connection', (ws) => {
             ok: true,
             markdown: msg.markdown || '',
             attachments: msg.attachments || [],
-            failed: msg.failed || []
+            failed: msg.failed || [],
+            // only present when the caller asked for debug
+            rawSample: msg.rawSample,
+            rawLen: msg.rawLen
           });
         } else {
           p.resolve({ ok: false, error: msg.error || 'unknown error' });
@@ -206,3 +299,17 @@ server.listen(PORT, HOST, () => {
   console.log(`[relay] WebSocket: ws://${HOST}:${PORT}/ws`);
   console.log(`[relay] HTTP API:  http://${HOST}:${PORT}/api/chat`);
 });
+
+// Graceful shutdown: answer every pending caller with a clear error instead of
+// dropping them, then close.
+function shutdown() {
+  console.log('[relay] shutting down…');
+  failAllPending('relay is shutting down');
+  for (const ws of clients) {
+    try { ws.close(1001); } catch {}
+  }
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 1500).unref();
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

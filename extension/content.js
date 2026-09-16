@@ -42,6 +42,22 @@
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // Expected capture-protocol version — must match PROTOCOL in injected.js,
+  // which exposes its actual version as the `data-bridge-protocol` attribute on
+  // <html>. injected.js runs in the PAGE's MAIN world and its idempotency guard
+  // survives an extension reload, so reloading the extension alone can leave an
+  // OLD injected.js running in this tab. We fail loudly on that instead of
+  // silently parsing with stale capture code.
+  const EXPECTED_PROTOCOL = '2';
+  function protocolError() {
+    let actual = null;
+    try { actual = document.documentElement.getAttribute('data-bridge-protocol'); } catch (e) {}
+    if (actual === EXPECTED_PROTOCOL) return null;
+    return actual == null
+      ? 'injected.js (MAIN world) is not active — refresh the ChatGPT page (F5) and retry.'
+      : 'injected.js is an old version (protocol ' + actual + ', expected ' + EXPECTED_PROTOCOL + ') — refresh the ChatGPT page (F5) and retry.';
+  }
+
   // querySelector over a list of candidate selectors (first match wins).
   function $(selectors) {
     const list = Array.isArray(selectors) ? selectors : [selectors];
@@ -63,8 +79,11 @@
     throw new Error('ChatGPT composer not found — make sure the page is fully loaded.');
   }
 
-  // Start a new conversation (used for `conversation: "new"`).
-  function clickNewChat() {
+  // Start a new conversation (used for `conversation: "new"`). Verified: we
+  // poll until the SPA actually navigated to the fresh-chat URL, so a broken
+  // selector can never silently drop the message into the previous conversation.
+  async function clickNewChat() {
+    if (location.pathname === '/') return; // already on a fresh chat
     const candidates = [
       'a[href="/"]',
       'button[data-testid*="new-chat"]',
@@ -73,12 +92,19 @@
     ];
     for (const sel of candidates) {
       const el = document.querySelector(sel);
-      if (el) { el.click(); return; }
+      if (el) { el.click(); break; }
     }
     const byText = Array.from(document.querySelectorAll('button, a')).find(
       (b) => (b.textContent || '').trim().toLowerCase() === 'new chat'
     );
     if (byText) byText.click();
+
+    const start = Date.now();
+    while (Date.now() - start < 5000) {
+      if (location.pathname === '/') return;
+      await sleep(200);
+    }
+    throw new Error('could not start a new chat — the new-chat button was not found or navigation did not happen (update clickNewChat)');
   }
 
   // Write text into the composer by simulating a paste event. This is more
@@ -97,7 +123,9 @@
   // dependency). `injected.js` sets the `data-bridge-sent` attribute the moment
   // the conversation POST goes out; we poll for it and safely retry if the
   // submit was blocked (e.g. a file still uploading — the editor still holds
-  // text then, so re-submitting is safe and cannot double-send).
+  // text then, so re-submitting is safe and cannot double-send). Retries are
+  // capped and gently backed off so a stuck confirmation can never spam the
+  // same message into the conversation.
   async function submitWithConfirmation(requestId) {
     const editor = $(SELECTORS.editor);
     if (!editor) throw new Error('ChatGPT composer not found');
@@ -119,13 +147,21 @@
     submit();
 
     const start = Date.now();
-    while (Date.now() - start < 10000) {
+    const MAX_SUBMITS = 5;
+    let submits = 1;
+    let delay = 1000; // mild backoff: 1s, 1.5s, 2s, 2.5s
+    while (Date.now() - start < 12000) {
       if (sent()) return;
-      await sleep(500);
-      if (!sent() && (editor.innerText || '').trim().length > 0) submit();
+      await sleep(delay);
+      delay = Math.min(delay + 500, 2500);
+      if (sent()) return;
+      if (submits < MAX_SUBMITS && (editor.innerText || '').trim().length > 0) {
+        submit();
+        submits++;
+      }
     }
     if (sent()) return;
-    throw new Error('message was not sent — no conversation request observed (upload may still be in progress)');
+    throw new Error('message was not sent — no conversation request observed (upload may still be in progress, or timers are throttled because the tab is in the background)');
   }
 
   // Upload a .md file by placing a File into ChatGPT's hidden file input. This
@@ -152,29 +188,43 @@
   }
 
   // Wait for the network reply that injected.js posts back via a per-request
-  // DOM attribute (data-bridge-reply-<requestId>). Using a per-request key
-  // avoids a race when multiple requests overlap.
+  // DOM attribute (data-bridge-reply-<requestId>). Uses a MutationObserver on
+  // the attribute — its callback fires the moment the attribute is set and is
+  // NOT subject to background-tab timer throttling (the old 100ms setInterval
+  // polling was, which stalled the whole handshake in hidden tabs). A single
+  // one-shot timeout enforces the deadline.
   function waitForNetworkReply(requestId, timeoutMs) {
     return new Promise((resolve) => {
       const key = 'data-bridge-reply-' + requestId;
-      const start = Date.now();
-      const timer = setInterval(() => {
-        const el = document.documentElement;
-        const attr = el ? el.getAttribute(key) : null;
+      const el = document.documentElement;
+      let settled = false;
+
+      const finish = (d) => {
+        if (settled) return;
+        settled = true;
+        try { mo.disconnect(); } catch (e) {}
+        clearTimeout(timer);
+        resolve(d);
+      };
+      const check = () => {
+        if (settled || !el) return;
+        const attr = el.getAttribute(key);
         if (attr) {
           el.removeAttribute(key);
           try {
-            const d = JSON.parse(decodeURIComponent(attr));
-            clearInterval(timer);
-            resolve(d);
-            return;
+            finish(JSON.parse(decodeURIComponent(attr)));
           } catch (e) {}
         }
-        if (Date.now() - start > timeoutMs) {
-          clearInterval(timer);
-          resolve({ type: 'error', error: `timed out waiting for network reply (${Math.round(timeoutMs / 1000)}s)` });
-        }
-      }, 100);
+      };
+
+      const mo = new MutationObserver(check);
+      try { mo.observe(el, { attributes: true, attributeFilter: [key] }); } catch (e) {}
+      const timer = setTimeout(() => {
+        try { el.removeAttribute(key); } catch (e) {} // don't leave a stale attribute on <html>
+        finish({ type: 'error', error: `timed out waiting for network reply (${Math.round(timeoutMs / 1000)}s)` });
+      }, timeoutMs);
+
+      check(); // the reply may already be there
     });
   }
 
@@ -329,8 +379,13 @@
     if (busy) return { error: 'another request is already in progress — try again in a moment.' };
     busy = true;
     try {
+      const stale = protocolError();
+      if (stale) throw new Error(stale);
       await ensureReady();
-      if (request.conversation === 'new') { clickNewChat(); await sleep(800); }
+      if (request.conversation === 'new') {
+        await clickNewChat(); // verified navigation; throws instead of polluting the old chat
+        await ensureReady();  // the composer is re-created after the SPA navigation
+      }
 
       // Optional .md file upload.
       if (request.file && request.file.content != null) {
@@ -349,10 +404,15 @@
       await sleep(300);
       await submitWithConfirmation(requestId);
 
-      // Timeout slightly before the relay gives up, so the relay gets a clean
-      // error rather than silently dropping the result.
-      const timeoutMs = Math.max(30000, (Number(request.timeoutMs) || 240000) - 20000);
-      const net = await waitForNetworkReply(requestId, timeoutMs);
+      // The relay hands us an absolute deadline (its own timeout). EVERYTHING
+      // that is left — waiting for the reply AND capturing attachments — must
+      // fit inside it, otherwise the relay gives up first and the work is
+      // wasted. Reserve ~25s of the remaining budget for attachment capture +
+      // transport (floored so small timeouts still behave sanely).
+      const deadline = Number(request.deadline) ||
+        Date.now() + Math.min(Number(request.timeoutMs) || 240000, 600000);
+      const netWait = Math.max(30000, deadline - Date.now() - 25000);
+      const net = await waitForNetworkReply(requestId, netWait);
 
       let markdown = '';
       if (net.type === 'reply' && net.reply) {
@@ -363,9 +423,14 @@
         throw new Error(net.error || 'no ChatGPT reply captured');
       }
 
-      const { attachments, failed } = await captureArtifacts(timeoutMs);
+      const artifactsBudget = Math.max(10000, deadline - Date.now() - 5000);
+      const { attachments, failed } = await captureArtifacts(artifactsBudget);
       recordConversationId();
-      return { markdown, attachments, failed };
+      // `debug` is opt-in per request (see relay): it hands the raw captured
+      // stream back to the caller for diagnosing truncation/parse issues.
+      return request.debug
+        ? { markdown, attachments, failed, rawSample: net.rawSample || '', rawLen: net.rawLen || 0 }
+        : { markdown, attachments, failed };
     } catch (e) {
       return { error: e.message || String(e) };
     } finally {
@@ -379,6 +444,13 @@
       return true; // keep the message channel open for the async reply
     }
   });
+
+  // Early console warning if the MAIN-world script is stale or missing. The
+  // attribute may lag slightly behind at document_start, hence the delay.
+  setTimeout(() => {
+    const stale = protocolError();
+    if (stale) console.error('[chatgpt-bridge] ' + stale);
+  }, 1500);
 
   // Keep the service worker alive with a long-lived port + periodic heartbeat
   // messages. Without this, Chrome kills the idle worker and the WebSocket

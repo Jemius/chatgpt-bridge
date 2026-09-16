@@ -40,6 +40,7 @@ carries the usual automation risks (see **Disclaimer**).
 | Extension background | `extension/background.js` | WebSocket client; routes requests to the ChatGPT tab. |
 | Extension content | `extension/content.js` | DOM automation: paste message, submit, capture attachments. |
 | Extension injected | `extension/injected.js` | MAIN-world script that hooks `fetch` to read the streaming reply. |
+| Tools | `tools/` | `test-parse.js` (unit tests, `npm test`), `ask.js` / `ask-debug.js` (CLI helpers for testing the bridge end-to-end). |
 
 The key design decision: the **reply is read from the network layer** (by
 intercepting ChatGPT's `fetch` calls) rather than by scraping page class names,
@@ -100,15 +101,28 @@ The MCP server is `mcp/index.js` (Node, stdio, zero dependencies).
 
 ### 4. Test
 
+⚠️ **Do NOT validate the bridge with a short message** (`ping` → `Pong!`). Short
+replies only ever produce one stream fragment, so they look fine even when the
+reply path is broken. Always validate with a request that forces a LONG reply:
+
 ```bash
-curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -d '{"message":"hello"}'
+curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -d '{"message":"从1数到30，用逗号分隔，只输出数字。"}'
 ```
 
-You should get back `{"ok":true,"markdown":"Hello! ..."}`.
+You should get back all of `1,2,...,30`. If the reply comes back truncated,
+re-run with `"debug":true` added to the body — the result then also includes
+`rawSample` (the first 20k chars of the raw captured stream) and `rawLen`, which
+show exactly what the network layer saw.
+
+Offline unit tests for the parser (no browser needed):
+
+```bash
+npm test
+```
 
 ## Tools
 
-### `chatgpt_send(message, file?, conversation?, timeoutMs?, saveTo?)`
+### `chatgpt_send(message, file?, conversation?, timeoutMs?, saveTo?, debug?)`
 
 Sends a message and returns a JSON object:
 
@@ -126,8 +140,9 @@ Sends a message and returns a JSON object:
 | `message` (required) | The message to send. |
 | `file` | Optional absolute path to a `.md` file to upload (e.g. a result for review). Only `.md`. |
 | `conversation` | `new` to start a fresh chat (first message of a work session), `continue` (default) to keep the bound conversation. |
-| `timeoutMs` | Max wait in ms (default 240000). |
-| `saveTo` | Optional path; saves the reply there and any attachments into the same folder (collision-safe). |
+| `timeoutMs` | Max wait in ms (default 240000, hard cap 10 minutes). |
+| `saveTo` | Optional path; saves the reply there and any attachments into the same folder. Collision-safe: a file that already exists on disk (or repeats within one run) gets a numeric suffix — `plan.md` → `plan (1).md` — instead of being overwritten. |
+| `debug` | Diagnostic mode: the result also contains `rawSample` (first 20k chars of the raw captured stream) and `rawLen`. Use only when debugging reply truncation or parsing. |
 
 ### `chatgpt_bridge_status()`
 
@@ -142,17 +157,39 @@ message. If the relay is down, it returns the exact command to start it.
 | `PORT` | `8742` | Relay port (WebSocket + HTTP). |
 | `HOST` | `127.0.0.1` | Bind address. **Keep it localhost.** |
 | `BRIDGE_RELAY` | `http://127.0.0.1:8742` | Relay URL the MCP server calls. |
+| `BRIDGE_TOKEN` | _(unset)_ | Optional shared secret. When set, HTTP clients must send it as the `x-bridge-token` header and the extension must store it (see Security below). |
 
 If you change the port, update the extension too (see `background.js`
 `DEFAULT_RELAY_URL`, or set `chrome.storage.local` `relayUrl`).
 
 ## Security
 
-⚠️ **The relay has no authentication and must stay bound to `127.0.0.1`.** On a
-single-user machine the main risk is a malicious *local* process (or a webpage
-that talks to localhost) sending messages on your behalf. Do **not** expose the
-port to the network, and do not use this on a multi-user/shared machine without
-understanding that risk.
+The relay binds to `127.0.0.1` and enforces three defenses out of the box:
+
+1. **Host check** — the `Host` header must be loopback, which blocks
+   DNS-rebinding attacks.
+2. **Origin check** — requests carrying a browser `Origin` header are only
+   accepted from browser extensions (`chrome-extension://`). Ordinary web pages
+   can therefore neither call the HTTP API nor open the WebSocket — even though
+   browsers don't apply CORS to WebSockets or "simple" POSTs. Non-browser
+   clients (curl, Node) send no `Origin` and are unaffected.
+3. **Optional token** — set `BRIDGE_TOKEN` to require a shared secret:
+   - MCP / HTTP: start the relay **and** the MCP server with the same
+     `BRIDGE_TOKEN` value; the MCP sends it as `x-bridge-token`.
+   - Extension: in the extension's service-worker console run
+     `chrome.storage.local.set({ bridgeToken: 'your-secret' })` — it is
+     appended to the WebSocket URL as `?token=`.
+
+Remaining risk: any process running under **your own user account** on the same
+machine can still talk to the relay (it has no OS-level identity). That is the
+standard localhost trust boundary; don't run untrusted local software alongside
+it, and never expose the port to the network.
+
+Test with a token enabled:
+
+```bash
+curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x-bridge-token: your-secret" -d '{"message":"hello"}'
+```
 
 ## Troubleshooting
 
@@ -163,9 +200,17 @@ understanding that risk.
 - **`content script not ready`** — after an extension reload the tab may lack the
   script; the bridge auto-injects and retries. If it still fails, reload the tab.
 - **Reply is missing / parse failed** — the backend's streaming format changed.
-  The error will include a raw sample; see `extension/injected.js` `parseReply`.
+  The error will include a raw sample; the parser lives in `extension/injected.js`
+  (`mergeInto` / `collectText` / `assemble`), with unit tests in `tools/test-parse.js`.
+- **`injected.js is an old version` / MAIN world not active** — the extension was
+  reloaded without refreshing the ChatGPT tab; refresh the tab (F5). The content
+  script fails loudly on this protocol-version mismatch instead of silently
+  parsing with stale capture code.
 - **`EADDRINUSE`** — an old relay is still running; stop it first (the relay now
   prints the exact command).
+- **HTTP 403 from the relay** — a `BRIDGE_TOKEN` is set on the relay but the
+  client didn't send it. Match the token on the MCP (`BRIDGE_TOKEN` env var)
+  and in the extension (`chrome.storage.local.set({ bridgeToken: ... })`).
 
 ## Known limitations
 
@@ -175,8 +220,11 @@ understanding that risk.
   captured best-effort by reading the canvas editor; this can also break when
   ChatGPT changes its DOM. For a robust loop, ask ChatGPT to output the plan as
   plain text.
-- ChatGPT's frontend changes often; the reply path is network-based and stable,
-  but the DOM-automation parts (paste, submit, upload) may need selector updates.
+- ChatGPT's frontend changes often. The reply path is network-based and more
+  robust than DOM scraping — it survives class-name changes and handles both
+  full-snapshot and `delta_encoding: v1` incremental streams — but any protocol
+  change can still require parser updates. After unusual truncation, run
+  `npm test` and re-check with `debug: true` to capture a raw stream sample.
 
 ## Disclaimer
 
