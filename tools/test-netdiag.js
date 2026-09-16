@@ -78,6 +78,36 @@ const cases = [
     setup: () => { el.setAttribute('data-bridge-net-diag', JSON.stringify({ status: 429, contentType: '', chunks: 0 })); },
     call: () => api.formatNetDiag(Date.now()),
     expect: '; bridge diagnostics: saw HTTP 429 on the conversation endpoint — likely a challenge/limit page; 0 reply chunk(s) received'
+  },
+  {
+    name: 'N-16 gap1: HTTP 200 with zero chunks is NOT labelled a challenge page',
+    setup: () => { el.setAttribute('data-bridge-net-diag', JSON.stringify({ status: 200, contentType: 'text/event-stream', chunks: 0, requestId: 'r1' })); },
+    call: () => api.formatNetDiag(Date.now(), 'r1'),
+    expect: '; bridge diagnostics: the conversation endpoint accepted the request (HTTP 200) but sent no chunk at all — the stream went silent'
+  },
+  {
+    name: 'N-16 gap1: HTTP 200 with chunks still reports progress (no challenge label)',
+    setup: () => { el.setAttribute('data-bridge-net-diag', JSON.stringify({ status: 200, contentType: 'text/event-stream', chunks: 9, lastChunkAt: Date.now() - 2000, requestId: 'r1' })); },
+    call: () => api.formatNetDiag(Date.now(), 'r1'),
+    expect: '; bridge diagnostics: 9 reply chunk(s) received, last 2s ago'
+  },
+  {
+    name: 'N-16 gap2: an observation stamped with ANOTHER request id is ignored',
+    setup: () => { el.setAttribute('data-bridge-net-diag', JSON.stringify({ status: 403, contentType: 'text/html', chunks: 12, lastChunkAt: Date.now(), requestId: 'previous-turn' })); },
+    call: () => api.formatNetDiag(Date.now(), 'this-request'),
+    expect: ''
+  },
+  {
+    name: 'N-16 gap2: a matching request id is trusted',
+    setup: () => { el.setAttribute('data-bridge-net-diag', JSON.stringify({ status: 403, contentType: 'text/html', requestId: 'this-request' })); },
+    call: () => api.formatNetDiag(Date.now(), 'this-request'),
+    expect: '; bridge diagnostics: saw HTTP 403 (text/html) on the conversation endpoint — likely a challenge/limit page'
+  },
+  {
+    name: 'N-16 gap2: an old injected.js (no requestId) is still trusted',
+    setup: () => { el.setAttribute('data-bridge-net-diag', JSON.stringify({ status: 403, contentType: 'text/html' })); },
+    call: () => api.formatNetDiag(Date.now(), 'this-request'),
+    expect: '; bridge diagnostics: saw HTTP 403 (text/html) on the conversation endpoint — likely a challenge/limit page'
   }
 ];
 
@@ -106,6 +136,27 @@ const cases = [
     const expect = 'timed out waiting for network reply (1s)'
       + '; bridge diagnostics: saw HTTP 403 (text/html) on the conversation endpoint — likely a challenge/limit page';
     check('waitForNetworkReply: timeout error carries the diagnostics suffix',
+      net.type === 'error' && net.error === expect, expect, net.error || JSON.stringify(net), null);
+  }
+
+  // End-to-end: the gap-1 shape (HTTP 200, zero chunks) now carries a suffix.
+  {
+    el.removeAttribute('data-bridge-net-diag');
+    el.setAttribute('data-bridge-net-diag', JSON.stringify({ status: 200, contentType: 'text/event-stream', chunks: 0, requestId: 'req-silent' }));
+    const net = await api.waitForNetworkReply('req-silent', 1100, Date.now());
+    const expect = 'timed out waiting for network reply (1s)'
+      + '; bridge diagnostics: the conversation endpoint accepted the request (HTTP 200) but sent no chunk at all — the stream went silent';
+    check('waitForNetworkReply: "accepted then silent" is distinguishable from an old extension',
+      net.type === 'error' && net.error === expect, expect, net.error || JSON.stringify(net), null);
+  }
+
+  // End-to-end: diagnostics belonging to another request do not leak in.
+  {
+    el.removeAttribute('data-bridge-net-diag');
+    el.setAttribute('data-bridge-net-diag', JSON.stringify({ status: 403, contentType: 'text/html', requestId: 'someone-else' }));
+    const net = await api.waitForNetworkReply('req-mine', 1100, Date.now());
+    const expect = 'timed out waiting for network reply (1s)';
+    check('waitForNetworkReply: another request\'s diagnostics are not attributed to this one',
       net.type === 'error' && net.error === expect, expect, net.error || JSON.stringify(net), null);
   }
 

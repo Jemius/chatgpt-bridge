@@ -113,13 +113,18 @@
         // several responses; every one of them is folded into the same capture.
         if (watching && /backend-api\/(?:f\/)?conversation/.test(url) && method === 'POST') {
           if (res.status === 200 && !/text\/html/.test(ct)) {
+            // N-16 gap 1: record that the stream response ARRIVED, before any
+            // chunk does. Without this, "sent, HTTP 200, not one byte back"
+            // wrote nothing at all, so it was indistinguishable from "this
+            // extension is older than v1.2.9".
+            recordNetDiag({ status: res.status, contentType: ct, at: Date.now(), chunks: 0, requestId: watching });
             captureResponse(res.clone(), watching);
           } else {
             // N-16: a non-200 / HTML response on the conversation endpoint is
             // how a challenge or limit page presents. Swallowing it silently
             // made the whole request look like a plain timeout. Record it so
             // the content script can name the suspect when its wait fails.
-            recordNetDiag({ status: res.status, contentType: ct, at: Date.now() });
+            recordNetDiag({ status: res.status, contentType: ct, at: Date.now(), requestId: watching });
           }
         }
       }
@@ -163,7 +168,11 @@
               const now = Date.now();
               if (now - (entry.lastDiagAt || 0) > 500) {
                 entry.lastDiagAt = now;
-                recordNetDiag({ chunks: entry.chunks, lastChunkAt: now });
+                // N-16 gap 2: only the request we are CURRENTLY watching may
+                // write the shared scratchpad. A previous turn's stream can
+                // still be trickling chunks after `watching` moved on, which
+                // used to make a silent request look alive.
+                if (watching === reqId) recordNetDiag({ chunks: entry.chunks, lastChunkAt: now, requestId: reqId });
               }
             }
           } catch (e) {

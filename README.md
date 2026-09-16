@@ -224,12 +224,17 @@ curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x
   request, so half-composed state cannot leak into the next conversation.
 - **`timed out waiting for network reply (Ns)`** — the reply stream never
   completed within the budget. The message may carry a `bridge diagnostics:`
-  suffix (from the page-side network scratchpad): `saw HTTP 403 (text/html)
-  …` means the conversation endpoint answered with a challenge/limit page
-  instead of the stream (refresh the tab, wait, retry later); `N reply
-  chunk(s) received, last Xs ago` tells you whether the stream was alive but
-  slow (N grew) or hung at zero bytes (no suffix / N=0). No suffix means the
-  extension is older than v1.2.9 or nothing was observed.
+  suffix (from the page-side network scratchpad). Four states are
+  distinguishable:
+  - `saw HTTP 403 (text/html) … likely a challenge/limit page` — the
+    conversation endpoint answered with a challenge/limit page instead of the
+    stream: refresh the tab, wait, retry later.
+  - `accepted the request (HTTP 200) but sent no chunk at all — the stream
+    went silent` — sent, accepted, then silent (this state used to be
+    indistinguishable from "extension older than v1.2.9").
+  - `N reply chunk(s) received, last Xs ago` — the stream is alive: N large
+    with X small means slow; N frozen with X growing means it stopped.
+  - no suffix — nothing was observed, or the extension is older than v1.2.9.
 - **HTTP 403 from the relay** — a `BRIDGE_TOKEN` is set on the relay but the
   client didn't send it. Match the token on the MCP (`BRIDGE_TOKEN` env var)
   and in the extension (`chrome.storage.local.set({ bridgeToken: ... })`).
@@ -241,7 +246,9 @@ curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x
 - **Canvas document attachments** (when ChatGPT generates a real `.md` file) are
   captured best-effort by reading the canvas editor; this can also break when
   ChatGPT changes its DOM. Each file is clicked once (targets are deduplicated
-  by filename), cards inside your own message — i.e. files you uploaded — are
+  by normalized filename — a "下载 x.md" / "Download x.md" download link and
+  its "x.md" chip are the same file), cards inside your own message — i.e.
+  files you uploaded — are
   skipped, and every read is bound to its click: only a canvas that is new or
   changed relative to the pre-click snapshot counts, so a canvas left open by
   an earlier request can never shadow a later capture. Card selection is bound

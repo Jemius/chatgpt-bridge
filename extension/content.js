@@ -253,16 +253,26 @@
   // scratchpad is unreadable — the suffix is purely additive and must never
   // break the error message. Old injected.js builds never write the
   // attribute, in which case this degrades to the old message.
-  function formatNetDiag(sentAt) {
+  function formatNetDiag(sentAt, requestId) {
     let diag = null;
     try { diag = JSON.parse(document.documentElement.getAttribute('data-bridge-net-diag') || 'null'); } catch (e) {}
     if (!diag || typeof diag !== 'object') return '';
+    // N-16 gap 2: the scratchpad is shared, and a previous turn's stream can
+    // still be trickling into it. An observation stamped with a DIFFERENT
+    // request id describes that request, not ours — ignore it rather than
+    // reporting a silent request as alive. (An older injected.js writes no
+    // requestId at all; those observations are still trusted.)
+    if (diag.requestId && requestId && diag.requestId !== requestId) return '';
     const parts = [];
-    if (diag.status != null) {
+    // N-16 gap 1: a 200 answer is recorded now too, so the challenge label must
+    // be reserved for non-200 responses.
+    if (diag.status != null && diag.status !== 200) {
       parts.push('saw HTTP ' + diag.status + (diag.contentType ? ' (' + diag.contentType + ')' : '')
         + ' on the conversation endpoint — likely a challenge/limit page');
     }
-    if (diag.chunks != null) {
+    if (diag.status === 200 && diag.chunks === 0) {
+      parts.push('the conversation endpoint accepted the request (HTTP 200) but sent no chunk at all — the stream went silent');
+    } else if (diag.chunks != null) {
       const ago = (sentAt && diag.lastChunkAt)
         ? ', last ' + Math.max(0, Math.round((Date.now() - diag.lastChunkAt) / 1000)) + 's ago'
         : '';
@@ -301,7 +311,7 @@
       const timer = setTimeout(() => {
         try { el.removeAttribute(key); } catch (e) {} // don't leave a stale attribute on <html>
         const secs = Math.round(timeoutMs / 1000);
-        finish({ type: 'error', error: `timed out waiting for network reply (${secs}s)` + formatNetDiag(sentAt) });
+        finish({ type: 'error', error: `timed out waiting for network reply (${secs}s)` + formatNetDiag(sentAt, requestId) });
       }, timeoutMs);
 
       check(); // the reply may already be there
@@ -469,13 +479,25 @@
   // content identical to the first, spun out its whole timeout, and landed in
   // `failed` — a misleading error sitting right next to the successful
   // capture. Dedup by resolved filename; nameless buttons stay one-per-node.
+  // N-19: a file card can surface as a download LINK whose text is
+  // 「下载 <name>.md」 (or "Download <name>.md") instead of the bare filename.
+  // The dedup key must be normalized to the trailing <name>.md token, or the
+  // same file is clicked, read and delivered twice under two different names.
+  function normalizeArtifactName(name) {
+    const n = String(name);
+    if (/^[^\s/\\]+\.md$/i.test(n)) return n;
+    const m = n.match(/([^\s/\\]+\.md)\b/i);
+    return m ? m[1] : n;
+  }
+
   function collectArtifactTargets(nodes, api) {
     const byName = new Map();
     const unnamed = [];
     for (const b of nodes) {
       if (api.isUserArtifact(b)) continue;
-      const name = api.artifactFilename(b);
-      if (name === 'document.md') { unnamed.push({ btn: b, filename: name }); continue; }
+      const raw = api.artifactFilename(b);
+      if (raw === 'document.md') { unnamed.push({ btn: b, filename: raw }); continue; }
+      const name = normalizeArtifactName(raw);   // N-19: normalize BEFORE dedup
       if (!byName.has(name)) byName.set(name, { btn: b, filename: name });
     }
     return [...byName.values(), ...unnamed];

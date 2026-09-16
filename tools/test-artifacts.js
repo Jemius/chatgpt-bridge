@@ -74,6 +74,21 @@ const targetCases = [
     name: 'nameless button keeps a generic-name target (never silently dropped)',
     nodes: [fakeBtn('', '打开文档', false)],
     expect: ['document.md']
+  },
+  {
+    name: 'N-19: aria-label card + a link whose text is 「下载 x.md」 -> ONE target',
+    nodes: [fakeBtn('x.md', '', false), fakeBtn('', '下载 x.md', false)],
+    expect: ['x.md']
+  },
+  {
+    name: 'N-19: english UI link text "Download x.md" -> ONE target',
+    nodes: [fakeBtn('', 'Download x.md', false)],
+    expect: ['x.md']
+  },
+  {
+    name: 'N-19: observed shape - aria-label v129-hist.md + text 「下载 v129-hist.md」 -> ONE target',
+    nodes: [fakeBtn('v129-hist.md', '', false), fakeBtn('', '下载 v129-hist.md', false)],
+    expect: ['v129-hist.md']
   }
 ];
 
