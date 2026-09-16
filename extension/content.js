@@ -134,6 +134,33 @@
     el.dispatchEvent(ev);
   }
 
+  // Best-effort composer reset: remove any file chips, then clear the text.
+  // N-12: a failed submit must never leave a half-composed message + uploaded
+  // file behind to leak into the next request. Every step is best-effort —
+  // cleanup failures must not mask the original error.
+  function clearComposer() {
+    const editor = $(SELECTORS.editor);
+    if (!editor) return;
+    const form = editor.closest('form') || editor.closest('main') || document;
+    // File chips carry a remove affordance; click every one we can find
+    // (English and Chinese UI labels). The chips live inside the composer
+    // area, so the scoping keeps this away from unrelated page buttons.
+    let chips = [];
+    try {
+      chips = Array.from(form.querySelectorAll('[data-testid*="remove" i], [aria-label*="remove" i], [aria-label*="移除"], [aria-label*="删除"]'));
+    } catch (e) {}
+    for (const c of chips) { try { c.click(); } catch (e) {} }
+    // Clear the text: select-all + delete on the contenteditable, with a
+    // keyboard fallback for ProseMirror builds that ignore execCommand.
+    try { editor.focus(); } catch (e) {}
+    try { document.execCommand('selectAll', false, null); document.execCommand('delete', false, null); } catch (e) {}
+    if ((editor.innerText || '').trim()) {
+      try {
+        editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', code: 'Backspace', keyCode: 8, which: 8, bubbles: true, cancelable: true }));
+      } catch (e) {}
+    }
+  }
+
   // Submit the message and confirm the send at the NETWORK layer (no DOM class
   // dependency). `injected.js` sets the `data-bridge-sent` attribute the moment
   // the conversation POST goes out; we poll for it and safely retry if the
@@ -141,7 +168,13 @@
   // text then, so re-submitting is safe and cannot double-send). Retries are
   // capped and gently backed off so a stuck confirmation can never spam the
   // same message into the conversation.
-  async function submitWithConfirmation(requestId) {
+  //
+  // N-12: the confirmation window used to be a fixed 12s. A file whose upload
+  // settles slowly can push the actual conversation POST past that window —
+  // the bridge reported "not sent" while ChatGPT delivered the message anyway,
+  // and the next request then inherited half-composed state. The window now
+  // scales with the remaining request budget (floor 12s, cap 60s).
+  async function submitWithConfirmation(requestId, confirmBudgetMs) {
     const editor = $(SELECTORS.editor);
     if (!editor) throw new Error('ChatGPT composer not found');
     if (!(editor.innerText || '').trim()) throw new Error('composer is empty — the message was not pasted');
@@ -161,11 +194,12 @@
     document.documentElement.removeAttribute('data-bridge-sent');
     submit();
 
+    const confirmMs = Math.min(60000, Math.max(12000, Number(confirmBudgetMs) || 0));
     const start = Date.now();
     const MAX_SUBMITS = 5;
     let submits = 1;
     let delay = 1000; // mild backoff: 1s, 1.5s, 2s, 2.5s
-    while (Date.now() - start < 12000) {
+    while (Date.now() - start < confirmMs) {
       if (sent()) return;
       await sleep(delay);
       delay = Math.min(delay + 500, 2500);
@@ -176,7 +210,7 @@
       }
     }
     if (sent()) return;
-    throw new Error('message was not sent — no conversation request observed (upload may still be in progress, or timers are throttled because the tab is in the background)');
+    throw new Error('message was not sent — no conversation request observed within ' + Math.round(confirmMs / 1000) + 's. The message MAY still have been sent after this check gave up — do not blindly retry; the composer is cleared automatically.');
   }
 
   // Upload a .md file by placing a File into ChatGPT's hidden file input. This
@@ -454,6 +488,7 @@
       const stale = protocolError();
       if (stale) throw new Error(stale);
       await ensureReady();
+      clearComposer(); // N-12: defensively clear residue left by a previous failed request
       if (request.conversation === 'new') {
         await clickNewChat(); // verified navigation; throws instead of polluting the old chat
         await ensureReady();  // the composer is re-created after the SPA navigation
@@ -467,6 +502,13 @@
         await sleep(3000); // give the upload time; send success is confirmed at the network layer
       }
 
+      // Overall request deadline (the relay hands us an absolute one).
+      // Computed up front so the submit-confirmation window can scale with
+      // the remaining budget (N-12: a slow upload used to outrun the old
+      // fixed 12s confirmation window).
+      const deadline = Number(request.deadline) ||
+        Date.now() + Math.min(Number(request.timeoutMs) || 240000, 600000);
+
       // Tell injected.js to watch for the next network reply.
       const requestId = 'req-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
       document.documentElement.setAttribute('data-bridge-watch', requestId);
@@ -474,15 +516,13 @@
 
       setEditorText(request.message);
       await sleep(300);
-      await submitWithConfirmation(requestId);
+      await submitWithConfirmation(requestId, deadline - Date.now() - 25000);
 
       // The relay hands us an absolute deadline (its own timeout). EVERYTHING
       // that is left — waiting for the reply AND capturing attachments — must
       // fit inside it, otherwise the relay gives up first and the work is
       // wasted. Reserve ~25s of the remaining budget for attachment capture +
       // transport (floored so small timeouts still behave sanely).
-      const deadline = Number(request.deadline) ||
-        Date.now() + Math.min(Number(request.timeoutMs) || 240000, 600000);
       const netWait = Math.max(30000, deadline - Date.now() - 25000);
       const net = await waitForNetworkReply(requestId, netWait);
 
@@ -504,6 +544,7 @@
         ? { markdown, attachments, failed, rawSample: net.rawSample || '', rawLen: net.rawLen || 0 }
         : { markdown, attachments, failed };
     } catch (e) {
+      try { clearComposer(); } catch (e2) {} // N-12: never leave a half-composed message + file behind
       return { error: e.message || String(e) };
     } finally {
       busy = false;

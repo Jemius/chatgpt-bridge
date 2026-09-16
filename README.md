@@ -208,6 +208,13 @@ curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x
   parsing with stale capture code.
 - **`EADDRINUSE`** — an old relay is still running; stop it first (the relay now
   prints the exact command).
+- **`message was not sent — no conversation request observed`** — the submit
+  confirmation gave up, usually because a file upload settled slowly (the
+  confirmation window now scales with the remaining request budget, 12–60s).
+  The message MAY actually have been delivered after the check gave up — do
+  not blindly resend. The composer (text + file chips) is cleared
+  automatically after this error, and defensively at the start of the next
+  request, so half-composed state cannot leak into the next conversation.
 - **HTTP 403 from the relay** — a `BRIDGE_TOKEN` is set on the relay but the
   client didn't send it. Match the token on the MCP (`BRIDGE_TOKEN` env var)
   and in the extension (`chrome.storage.local.set({ bridgeToken: ... })`).
