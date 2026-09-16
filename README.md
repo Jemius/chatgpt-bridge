@@ -40,7 +40,7 @@ carries the usual automation risks (see **Disclaimer**).
 | Extension background | `extension/background.js` | WebSocket client; routes requests to the ChatGPT tab. |
 | Extension content | `extension/content.js` | DOM automation: paste message, submit, capture attachments. |
 | Extension injected | `extension/injected.js` | MAIN-world script that hooks `fetch` to read the streaming reply. |
-| Tools | `tools/` | `test-parse.js` + `test-artifacts.js` + `test-protocol.js` (unit tests incl. the cross-file protocol-version pair check, `npm test`), `ask.js` / `ask-debug.js` (CLI helpers for testing the bridge end-to-end). |
+| Tools | `tools/` | `test-parse.js` + `test-artifacts.js` + `test-protocol.js` + `test-netdiag.js` (unit tests incl. the cross-file protocol-version pair check, `npm test`), `ask.js` / `ask-debug.js` (CLI helpers for testing the bridge end-to-end). |
 
 The key design decision: the **reply is read from the network layer** (by
 intercepting ChatGPT's `fetch` calls) rather than by scraping page class names,
@@ -222,6 +222,14 @@ curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x
   not blindly resend. The composer (text + file chips) is cleared
   automatically after this error, and defensively at the start of the next
   request, so half-composed state cannot leak into the next conversation.
+- **`timed out waiting for network reply (Ns)`** — the reply stream never
+  completed within the budget. The message may carry a `bridge diagnostics:`
+  suffix (from the page-side network scratchpad): `saw HTTP 403 (text/html)
+  …` means the conversation endpoint answered with a challenge/limit page
+  instead of the stream (refresh the tab, wait, retry later); `N reply
+  chunk(s) received, last Xs ago` tells you whether the stream was alive but
+  slow (N grew) or hung at zero bytes (no suffix / N=0). No suffix means the
+  extension is older than v1.2.9 or nothing was observed.
 - **HTTP 403 from the relay** — a `BRIDGE_TOKEN` is set on the relay but the
   client didn't send it. Match the token on the MCP (`BRIDGE_TOKEN` env var)
   and in the extension (`chrome.storage.local.set({ bridgeToken: ... })`).
@@ -236,7 +244,10 @@ curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x
   by filename), cards inside your own message — i.e. files you uploaded — are
   skipped, and every read is bound to its click: only a canvas that is new or
   changed relative to the pre-click snapshot counts, so a canvas left open by
-  an earlier request can never shadow a later capture. For a robust loop, ask
+  an earlier request can never shadow a later capture. Card selection is bound
+  to the submit too: only cards that appear AFTER the message was submitted are
+  captured, so document cards from earlier turns of a continued conversation
+  are never re-read as this reply's attachments. For a robust loop, ask
   ChatGPT to output the plan as plain text.
 - ChatGPT-internal citation markers (`filecite …` phrases wrapped in private-use
   sentinel characters) are stripped from replies before delivery. The same

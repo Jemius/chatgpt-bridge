@@ -247,7 +247,32 @@
   // NOT subject to background-tab timer throttling (the old 100ms setInterval
   // polling was, which stalled the whole handshake in hidden tabs). A single
   // one-shot timeout enforces the deadline.
-  function waitForNetworkReply(requestId, timeoutMs) {
+  // N-16: format the injected-side network diagnostics (written by
+  // recordNetDiag in injected.js onto <html data-bridge-net-diag>) into a
+  // suffix for timeout errors. Returns '' when nothing was observed or the
+  // scratchpad is unreadable — the suffix is purely additive and must never
+  // break the error message. Old injected.js builds never write the
+  // attribute, in which case this degrades to the old message.
+  function formatNetDiag(sentAt) {
+    let diag = null;
+    try { diag = JSON.parse(document.documentElement.getAttribute('data-bridge-net-diag') || 'null'); } catch (e) {}
+    if (!diag || typeof diag !== 'object') return '';
+    const parts = [];
+    if (diag.status != null) {
+      parts.push('saw HTTP ' + diag.status + (diag.contentType ? ' (' + diag.contentType + ')' : '')
+        + ' on the conversation endpoint — likely a challenge/limit page');
+    }
+    if (diag.chunks != null) {
+      const ago = (sentAt && diag.lastChunkAt)
+        ? ', last ' + Math.max(0, Math.round((Date.now() - diag.lastChunkAt) / 1000)) + 's ago'
+        : '';
+      parts.push(diag.chunks + ' reply chunk(s) received' + ago);
+    }
+    if (!parts.length) return '';
+    return '; bridge diagnostics: ' + parts.join('; ');
+  }
+
+  function waitForNetworkReply(requestId, timeoutMs, sentAt) {
     return new Promise((resolve) => {
       const key = 'data-bridge-reply-' + requestId;
       const el = document.documentElement;
@@ -275,7 +300,8 @@
       try { mo.observe(el, { attributes: true, attributeFilter: [key] }); } catch (e) {}
       const timer = setTimeout(() => {
         try { el.removeAttribute(key); } catch (e) {} // don't leave a stale attribute on <html>
-        finish({ type: 'error', error: `timed out waiting for network reply (${Math.round(timeoutMs / 1000)}s)` });
+        const secs = Math.round(timeoutMs / 1000);
+        finish({ type: 'error', error: `timed out waiting for network reply (${secs}s)` + formatNetDiag(sentAt) });
       }, timeoutMs);
 
       check(); // the reply may already be there
@@ -455,14 +481,34 @@
     return [...byName.values(), ...unnamed];
   }
 
+  // N-15: in a CONTINUED conversation, document cards from earlier turns are
+  // still in the DOM. captureArtifacts used to query the whole document, so
+  // every historical card was re-clicked and re-read, and old files came back
+  // as this reply's attachments. The fix mirrors the N-7 canvas approach:
+  // snapshot the existing card nodes BEFORE submitting (handleChat does that)
+  // and only cards outside the snapshot are capture candidates. Node identity
+  // is the key — not the filename — so a legitimately regenerated same-named
+  // file is still captured.
+  const ARTIFACT_CARD_SELECTOR = 'button[aria-label$=".md"], button[class*="peer/open-file"]';
+
+  function snapshotArtifactCards() {
+    const before = new Set();
+    let cards;
+    try { cards = document.querySelectorAll(ARTIFACT_CARD_SELECTOR); } catch (e) { return before; }
+    for (const b of cards) before.add(b);
+    return before;
+  }
+
   // Find every "document" card in the reply (e.g. 琵琶行.md), click to open it,
   // and read its content from the Canvas editor — one click per unique file,
   // each read bound to its own pre-click snapshot (see snapshotCanvases above).
-  async function captureArtifacts(timeoutMs) {
-    const targets = collectArtifactTargets(
-      document.querySelectorAll('button[aria-label$=".md"], button[class*="peer/open-file"]'),
-      { artifactFilename, isUserArtifact }
-    );
+  // `beforeCards` (optional, N-15) excludes cards that already existed before
+  // the message was submitted; without it the behavior is unchanged.
+  async function captureArtifacts(timeoutMs, beforeCards) {
+    let nodes;
+    try { nodes = document.querySelectorAll(ARTIFACT_CARD_SELECTOR); } catch (e) { nodes = []; }
+    if (beforeCards) nodes = [...nodes].filter((b) => !beforeCards.has(b));
+    const targets = collectArtifactTargets(nodes, { artifactFilename, isUserArtifact });
     if (!targets.length) return { attachments: [], failed: [] };
 
     const perFileTimeout = Math.max(5000, Math.min(15000, Math.floor(timeoutMs / Math.max(targets.length, 1))));
@@ -536,14 +582,23 @@
       const deadline = Number(request.deadline) ||
         Date.now() + Math.min(Number(request.timeoutMs) || 240000, 600000);
 
-      // Tell injected.js to watch for the next network reply.
+      // Tell injected.js to watch for the next network reply. Clear any stale
+      // N-16 diagnostics first so the scratchpad always describes THIS
+      // request, never the previous one.
       const requestId = 'req-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      try { document.documentElement.removeAttribute('data-bridge-net-diag'); } catch (e) {}
       document.documentElement.setAttribute('data-bridge-watch', requestId);
       await sleep(100);
+
+      // N-15: snapshot the artifact cards BEFORE submitting — in a continued
+      // conversation, cards from earlier turns are still in the DOM and would
+      // otherwise be re-read as this reply's attachments.
+      const artifactCardsBefore = snapshotArtifactCards();
 
       setEditorText(request.message);
       await sleep(300);
       await submitWithConfirmation(requestId, deadline - Date.now() - 25000);
+      const sentAt = Date.now(); // submit confirmed — reply waits and N-16 diagnostics are relative to this
 
       // The relay hands us an absolute deadline (its own timeout). EVERYTHING
       // that is left — waiting for the reply AND capturing attachments — must
@@ -551,7 +606,7 @@
       // wasted. Reserve ~25s of the remaining budget for attachment capture +
       // transport (floored so small timeouts still behave sanely).
       const netWait = Math.max(30000, deadline - Date.now() - 25000);
-      const net = await waitForNetworkReply(requestId, netWait);
+      const net = await waitForNetworkReply(requestId, netWait, sentAt);
 
       let markdown = '';
       if (net.type === 'reply' && net.reply) {
@@ -563,7 +618,7 @@
       }
 
       const artifactsBudget = Math.max(10000, deadline - Date.now() - 5000);
-      const { attachments, failed } = await captureArtifacts(artifactsBudget);
+      const { attachments, failed } = await captureArtifacts(artifactsBudget, artifactCardsBefore);
       recordConversationId();
       // `debug` is opt-in per request (see relay): it hands the raw captured
       // stream back to the caller for diagnosing truncation/parse issues.

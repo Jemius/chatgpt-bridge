@@ -62,6 +62,23 @@
   // The request id we are currently watching for (set via data-bridge-watch).
   let watching = null;
 
+  // N-16 diagnostics: a tiny always-latest scratchpad the content script can
+  // read when a wait fails, so "hung stream" becomes distinguishable from
+  // "slow generation". Records the last non-200/HTML conversation response
+  // (a challenge or limit page used to masquerade as a pure timeout) and
+  // streaming progress (chunk count + last chunk time). Written as JSON on
+  // <html data-bridge-net-diag>; every step is guarded — diagnostics must
+  // never throw.
+  function recordNetDiag(patch) {
+    try {
+      const el = document.documentElement;
+      let cur = {};
+      try { cur = JSON.parse(el.getAttribute('data-bridge-net-diag') || '{}') || {}; } catch (e) {}
+      for (const k of Object.keys(patch)) cur[k] = patch[k];
+      el.setAttribute('data-bridge-net-diag', JSON.stringify(cur));
+    } catch (e) {}
+  }
+
   // requestId -> { acc: Map<path,string>, fallback: string[], raw: string,
   //                settleTimer, done, posted, lastOp }
   const captures = new Map();
@@ -94,8 +111,16 @@
         //
         // NOTE: we deliberately do NOT clear `watching` here. The answer may span
         // several responses; every one of them is folded into the same capture.
-        if (watching && /backend-api\/(?:f\/)?conversation/.test(url) && method === 'POST' && res.status === 200 && !/text\/html/.test(ct)) {
-          captureResponse(res.clone(), watching);
+        if (watching && /backend-api\/(?:f\/)?conversation/.test(url) && method === 'POST') {
+          if (res.status === 200 && !/text\/html/.test(ct)) {
+            captureResponse(res.clone(), watching);
+          } else {
+            // N-16: a non-200 / HTML response on the conversation endpoint is
+            // how a challenge or limit page presents. Swallowing it silently
+            // made the whole request look like a plain timeout. Record it so
+            // the content script can name the suspect when its wait fails.
+            recordNetDiag({ status: res.status, contentType: ct, at: Date.now() });
+          }
         }
       }
     } catch (e) {}
@@ -130,7 +155,17 @@
           try {
             const { done, value } = await reader.read();
             if (done) break;
-            if (value) text += decoder.decode(value, { stream: true });
+            if (value) {
+              text += decoder.decode(value, { stream: true });
+              // N-16: throttled progress beacon — lets the caller tell "stream
+              // is alive but slow" apart from "sent but zero bytes back".
+              entry.chunks = (entry.chunks || 0) + 1;
+              const now = Date.now();
+              if (now - (entry.lastDiagAt || 0) > 500) {
+                entry.lastDiagAt = now;
+                recordNetDiag({ chunks: entry.chunks, lastChunkAt: now });
+              }
+            }
           } catch (e) {
             break; // stream interrupted (e.g. aborted) — treat as end, keep what we have
           }

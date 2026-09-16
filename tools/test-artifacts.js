@@ -19,15 +19,19 @@ if (start < 0 || end < 0) throw new Error('could not locate the capture block in
 const slice = full.slice(start, end);
 
 // Controllable fake DOM: `canvases` is what document.querySelectorAll returns
-// for the Canvas editor selector. Each entry is a minimal node that the real
+// for the Canvas editor selector; `cards` is what it returns for the artifact
+// card selector (N-15). Each entry is a minimal node that the real
 // extractMarkdown can walk (a single text child).
 const canvases = [];
+const cards = [];
 global.document = {
-  querySelectorAll: (sel) => (sel === 'div.ProseMirror.markdown' ? canvases : [])
+  querySelectorAll: (sel) => (sel === 'div.ProseMirror.markdown'
+    ? canvases
+    : (sel === 'button[aria-label$=".md"], button[class*="peer/open-file"]' ? cards : []))
 };
 
 const harness = 'const sleep = (ms) => new Promise((r) => setTimeout(r, ms));\n' + slice +
-  '\nreturn { artifactFilename, isUserArtifact, collectArtifactTargets, snapshotCanvases, waitForCanvasMarkdown };';
+  '\nreturn { artifactFilename, isUserArtifact, collectArtifactTargets, snapshotCanvases, waitForCanvasMarkdown, snapshotArtifactCards, captureArtifacts };';
 const api = new Function(harness)();
 
 // ---- fake nodes ------------------------------------------------------------
@@ -35,7 +39,9 @@ function fakeBtn(label, text, inUser) {
   return {
     getAttribute: (k) => (k === 'aria-label' ? label : null),
     textContent: text || '',
-    closest: (sel) => (inUser && sel === '[data-message-author-role="user"]' ? {} : null)
+    closest: (sel) => (inUser && sel === '[data-message-author-role="user"]' ? {} : null),
+    clicks: 0,
+    click() { this.clicks++; }
   };
 }
 function fakeCanvas(text) {
@@ -101,6 +107,76 @@ const canvasCases = [
   }
 ];
 
+// ---- N-15 submit-bound card selection cases ---------------------------------
+// Each `run` arranges the fake DOM itself: cards added before
+// api.snapshotArtifactCards() are "from earlier turns" (must be skipped and
+// never clicked); cards added after it are this reply's artifacts.
+const CARD_SEL = 'button[aria-label$=".md"], button[class*="peer/open-file"]';
+const n15Cases = [
+  {
+    name: 'N-15: pre-submit cards are skipped and never clicked; new card is captured',
+    run: async () => {
+      cards.length = 0; canvases.length = 0;
+      const old = fakeBtn('old.md', '', false);
+      cards.push(old);
+      const before = api.snapshotArtifactCards();
+      const fresh = fakeBtn('fresh.md', '', false);
+      fresh.click = function () { this.clicks++; canvases.push(fakeCanvas('FRESH-CONTENT')); };
+      cards.push(fresh);
+      const { attachments, failed } = await api.captureArtifacts(1000, before);
+      return JSON.stringify({ attachments, failed, oldClicks: old.clicks, freshClicks: fresh.clicks });
+    },
+    expect: JSON.stringify({
+      attachments: [{ filename: 'fresh.md', content: 'FRESH-CONTENT' }],
+      failed: [], oldClicks: 0, freshClicks: 1
+    })
+  },
+  {
+    name: 'N-15: without a snapshot (legacy single-turn path) pre-existing cards are still captured',
+    run: async () => {
+      cards.length = 0; canvases.length = 0;
+      const old = fakeBtn('old.md', '', false);
+      old.click = function () { this.clicks++; canvases.push(fakeCanvas('OLD-CONTENT')); };
+      const fresh = fakeBtn('fresh.md', '', false);
+      fresh.click = function () { this.clicks++; canvases.push(fakeCanvas('FRESH-CONTENT')); };
+      cards.push(old, fresh);
+      const { attachments } = await api.captureArtifacts(1000);
+      return JSON.stringify({ names: attachments.map((a) => a.filename), oldClicks: old.clicks, freshClicks: fresh.clicks });
+    },
+    expect: JSON.stringify({ names: ['old.md', 'fresh.md'], oldClicks: 1, freshClicks: 1 })
+  },
+  {
+    name: 'N-15: same-named card regenerated after submit is still captured (node-identity key)',
+    run: async () => {
+      cards.length = 0; canvases.length = 0;
+      const prev = fakeBtn('report.md', '', false);
+      cards.push(prev);
+      const before = api.snapshotArtifactCards();
+      const regen = fakeBtn('report.md', '', false);
+      regen.click = function () { this.clicks++; canvases.push(fakeCanvas('REGENERATED-CONTENT')); };
+      cards.push(regen);
+      const { attachments, failed } = await api.captureArtifacts(1000, before);
+      return JSON.stringify({ attachments, failed, prevClicks: prev.clicks, regenClicks: regen.clicks });
+    },
+    expect: JSON.stringify({
+      attachments: [{ filename: 'report.md', content: 'REGENERATED-CONTENT' }],
+      failed: [], prevClicks: 0, regenClicks: 1
+    })
+  },
+  {
+    name: 'N-15: continued conversation with no new cards -> empty result, zero clicks',
+    run: async () => {
+      cards.length = 0; canvases.length = 0;
+      const old = fakeBtn('old.md', '', false);
+      cards.push(old);
+      const before = api.snapshotArtifactCards();
+      const { attachments, failed } = await api.captureArtifacts(1000, before);
+      return JSON.stringify({ attachments, failed, oldClicks: old.clicks });
+    },
+    expect: JSON.stringify({ attachments: [], failed: [], oldClicks: 0 })
+  }
+];
+
 (async () => {
   let pass = 0, fail = 0;
   const check = (name, ok, expected, got, err) => {
@@ -126,6 +202,19 @@ const canvasCases = [
       if (c.afterSnapshot) c.afterSnapshot();
       got = await api.waitForCanvasMarkdown(700, before);
     } catch (e) { err = e; }
+    check(c.name, !err && got === c.expect, c.expect, got, err);
+  }
+
+  // N-15: the fake DOM routes queries by the exact selector string — if the
+  // selector in content.js ever drifts, the cases below would silently pass
+  // against an empty DOM. Pin it explicitly (same idea as test-protocol.js).
+  const selMatch = slice.match(/const ARTIFACT_CARD_SELECTOR = '([^']+)';/);
+  check('selector consistency: ARTIFACT_CARD_SELECTOR in content.js matches the test fake',
+    !!selMatch && selMatch[1] === CARD_SEL, CARD_SEL, selMatch ? selMatch[1] : '(not found)', null);
+
+  for (const c of n15Cases) {
+    let got, err = null;
+    try { got = await c.run(); } catch (e) { err = e; }
     check(c.name, !err && got === c.expect, c.expect, got, err);
   }
 
