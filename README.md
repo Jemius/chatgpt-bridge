@@ -130,7 +130,7 @@ Sends a message and returns a JSON object:
 {
   "reply": "ChatGPT's reply as Markdown",
   "attachments": [{ "filename": "plan.md", "content": "# Plan\n..." }],
-  "failed": [{ "filename": "x.md", "error": "attachment read timed out (canvas did not open or showed no new content)" }],
+  "failed": [{ "filename": "x.md", "error": "attachment read timed out after 15000ms (canvas did not open or showed no new content; canvases before=1 after=1 newOrChanged=0)" }],
   "savedPaths": ["C:/docs/result.md", "C:/docs/plan.md"]
 }
 ```

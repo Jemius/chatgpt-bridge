@@ -141,7 +141,12 @@
   function clearComposer() {
     const editor = $(SELECTORS.editor);
     if (!editor) return;
-    const form = editor.closest('form') || editor.closest('main') || document;
+    // Scope cleanup to the composer's own container. N-13 hardening: do NOT
+    // fall back to `document` — the broad remove/删除 chip query could then
+    // hit unrelated controls (e.g. "delete conversation"). No container,
+    // no cleanup.
+    const form = editor.closest('form') || editor.closest('main');
+    if (!form) return;
     // File chips carry a remove affordance; click every one we can find
     // (English and Chinese UI labels). The chips live inside the composer
     // area, so the scoping keeps this away from unrelated page buttons.
@@ -466,12 +471,34 @@
 
     for (const { btn, filename } of targets) {
       const before = snapshotCanvases();
+      const clickedAt = Date.now();
       btn.click();
       const md = await waitForCanvasMarkdown(perFileTimeout, before);
       if (md) {
         attachments.push({ filename, content: md });
       } else {
-        failed.push({ filename, error: 'attachment read timed out (canvas did not open or showed no new content)' });
+        // N-13 diagnostics: a rare capture flake cannot be located after the
+        // fact without a snapshot of the capture scene — how many canvases
+        // existed before the click, how many after, whether any of them is
+        // new/changed (but presumably empty), and how long we actually waited.
+        let canvasesAfter = -1;
+        let newOrChanged = -1;
+        try {
+          const all = document.querySelectorAll('div.ProseMirror.markdown');
+          canvasesAfter = all.length;
+          newOrChanged = 0;
+          for (const el of all) {
+            const text = extractMarkdown(el).trim();
+            if (text && !(before.has(el) && before.get(el) === text)) newOrChanged++;
+          }
+        } catch (e) {}
+        failed.push({
+          filename,
+          error: 'attachment read timed out after ' + (Date.now() - clickedAt) + 'ms'
+            + ' (canvas did not open or showed no new content;'
+            + ' canvases before=' + before.size + ' after=' + canvasesAfter
+            + ' newOrChanged=' + newOrChanged + ')'
+        });
       }
     }
     return { attachments, failed };
