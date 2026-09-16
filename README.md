@@ -40,7 +40,7 @@ carries the usual automation risks (see **Disclaimer**).
 | Extension background | `extension/background.js` | WebSocket client; routes requests to the ChatGPT tab. |
 | Extension content | `extension/content.js` | DOM automation: paste message, submit, capture attachments. |
 | Extension injected | `extension/injected.js` | MAIN-world script that hooks `fetch` to read the streaming reply. |
-| Tools | `tools/` | `test-parse.js` + `test-artifacts.js` (unit tests, `npm test`), `ask.js` / `ask-debug.js` (CLI helpers for testing the bridge end-to-end). |
+| Tools | `tools/` | `test-parse.js` + `test-artifacts.js` + `test-protocol.js` (unit tests incl. the cross-file protocol-version pair check, `npm test`), `ask.js` / `ask-debug.js` (CLI helpers for testing the bridge end-to-end). |
 
 The key design decision: the **reply is read from the network layer** (by
 intercepting ChatGPT's `fetch` calls) rather than by scraping page class names,

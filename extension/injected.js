@@ -51,7 +51,7 @@
   // inside an open tab. The version attribute lets the content script detect
   // that stale state and fail loudly ("refresh the ChatGPT page") instead of
   // silently parsing with old capture code.
-  const PROTOCOL = 3;
+  const PROTOCOL = 4;
   function exposeProtocol() {
     const el = document.documentElement;
     if (!el) { setTimeout(exposeProtocol, 0); return; }
