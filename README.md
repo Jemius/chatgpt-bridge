@@ -163,6 +163,32 @@ a `driftWarning` whenever the relay build and the extension build differ, so
 version drift surfaces on the next status check instead of hiding until
 someone curls /health.
 
+## Recommended agent workflow (default)
+
+Two round-trips are enough for the planner-executor loop. Do NOT ping-pong
+with the web UI at every step — every extra round costs real time and tokens.
+
+1. **Ask for the plan** — `chatgpt_send` with the requirement (omit
+   `conversation`; the default `continue` binds the chat).
+2. **Do the work locally.**
+3. **Submit the result** — `chatgpt_send` again, still on the default
+   `continue`, into the SAME conversation: a short summary in the message,
+   long content as a `.md` file attachment. ChatGPT reviews it. Done.
+
+Rules of thumb:
+
+- **Never pass `conversation: "new"` between steps 1 and 3.** `new` starts a
+  fresh chat, throws away the plan context, and re-pays for it in tokens.
+  Only use `new` for a genuinely different task, or when the user explicitly
+  asks for a fresh chat.
+- `continue` re-opens the bound conversation automatically, even after the
+  tab was closed or navigated away.
+- Don't send `hello`/`test` probes — `chatgpt_bridge_status` is free and
+  answers connectivity (plus version-drift warnings).
+- If a request fails with a session-rebinding error, just retry; the bridge
+  refuses to submit into the wrong page rather than silently starting a new
+  chat.
+
 ## Configuration
 
 | Env var | Default | Meaning |

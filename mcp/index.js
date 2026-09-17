@@ -69,7 +69,7 @@ const CHAT_TOOL = {
       conversation: {
         type: 'string',
         enum: ['continue', 'new'],
-        description: "new: start a fresh chat (use for the first message of a new work session); continue: keep the bound conversation (default)."
+        description: "Omit unless the user explicitly asks for a fresh chat. continue (default) re-opens the SAME bound conversation across calls. The default planner-executor flow needs exactly two calls in ONE conversation: (1) send the requirement, get the plan back; (2) after doing the work locally, send the result into the SAME conversation for review. NEVER pass 'new' between those steps — it starts a fresh chat, discards the plan context, and re-pays for it in tokens."
       },
       timeoutMs: { type: 'number', description: 'Max wait time in ms (default 240000).' },
       saveTo: {

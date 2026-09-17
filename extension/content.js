@@ -248,11 +248,22 @@
 
   // Record the current conversation id (from /c/<id>) so the background can
   // navigate back to it on `continue` and avoid polluting other conversations.
+  // User report (2026-09-18): right after the FIRST message of a fresh chat,
+  // ChatGPT may not have pushed /c/<id> into the URL yet when the network
+  // reply completes — the id was then never recorded, and the NEXT `continue`
+  // request ran on the home page, silently creating a NEW conversation.
+  // Poll briefly for the id instead of reading the URL exactly once.
   function recordConversationId() {
-    const m = location.pathname.match(/^\/c\/([^/]+)/);
-    if (m) {
-      try { chrome.storage.local.set({ boundConversationId: m[1] }); } catch (e) {}
-    }
+    const deadline = Date.now() + 4000;
+    const tick = () => {
+      const m = location.pathname.match(/^\/c\/([^/]+)/);
+      if (m) {
+        try { chrome.storage.local.set({ boundConversationId: m[1] }); } catch (e) {}
+      } else if (Date.now() < deadline) {
+        setTimeout(tick, 250);
+      }
+    };
+    tick();
   }
 
   // Wait for the network reply that injected.js posts back via a per-request

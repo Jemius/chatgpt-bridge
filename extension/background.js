@@ -195,17 +195,34 @@ async function handleChat(msg) {
   // Session binding: for `continue`, if the tab is on a different conversation
   // than the one we've been using, navigate back to it first. This prevents the
   // bridge from polluting your other conversations.
+  // User report (2026-09-18): when the navigation did NOT finish within the
+  // wait window (slow network / ChatGPT slowness), the request used to fall
+  // through and submit on the CURRENT page — which silently created a NEW
+  // conversation instead of continuing the bound one. Verify the tab actually
+  // got there; fail loudly with a retry hint instead of submitting into the
+  // wrong page (a retry is cheap; a wrong-page submit is not).
   if (msg.conversation !== 'new') {
+    let boundConversationId = null;
     try {
-      const { boundConversationId } = await chrome.storage.local.get('boundConversationId');
-      if (boundConversationId) {
+      boundConversationId = (await chrome.storage.local.get('boundConversationId')).boundConversationId;
+    } catch (e) {}
+    if (boundConversationId) {
+      try {
         const t = await chrome.tabs.get(tab.id);
         if (t.url && !t.url.includes('/c/' + boundConversationId)) {
           await chrome.tabs.update(tab.id, { url: 'https://chatgpt.com/c/' + boundConversationId });
           await waitForTabLoad(tab.id, 15000);
+          const t2 = await chrome.tabs.get(tab.id).catch(() => null);
+          if (!t2 || !t2.url || !t2.url.includes('/c/' + boundConversationId)) {
+            respond(msg.id, {
+              type: 'error',
+              error: 'session rebinding did not finish: the tab never reached conversation ' + boundConversationId + ' — the request was NOT submitted (retry; if this repeats, open the conversation manually and retry)'
+            });
+            return;
+          }
         }
-      }
-    } catch (e) {}
+      } catch (e) {} // navigation plumbing errors: keep legacy best-effort behavior
+    }
   }
 
   const payload = {
