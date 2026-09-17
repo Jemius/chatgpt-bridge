@@ -157,8 +157,11 @@ Checks whether the relay is running and whether an extension is connected —
 **without sending anything to ChatGPT**. Use this instead of probing with a test
 message. If the relay is down, it returns the exact command to start it. It also
 forwards the version-visibility fields (`relayVersion`, and `extension` with its
-`version` / `protocol` / `seenAt`), so "which build is actually running" is
-answerable from the status tool itself.
+`version` / `protocol` / `seenAt` / `ageMs`), so "which build is actually
+running" is answerable from the status tool itself — and since v1.2.13 it emits
+a `driftWarning` whenever the relay build and the extension build differ, so
+version drift surfaces on the next status check instead of hiding until
+someone curls /health.
 
 ## Configuration
 
@@ -171,9 +174,22 @@ answerable from the status tool itself.
 | `BRIDGE_LOG_BODY` | `1` | Set to `0` to keep only the message *length* in relay logs instead of the first 80 characters (useful when message content must not appear in logs). |
 
 Request limits enforced by the relay: request body up to **10 MB**, composer
-message up to **200,000 characters** (longer content belongs in a `.md` file
-attachment), `timeoutMs` clamped to **5 s – 10 min**, at most **50** concurrent
-in-flight requests, and WebSocket messages up to **10 MB**.
+message up to **10,000 characters** — this is the measured ChatGPT web-UI wall
+(audit 2026-09-18): the composer silently rejects longer pastes with a
+misleading "composer is empty" error, so the relay now fails fast with 413 and
+the real reason (`BRIDGE_COMPOSER_LIMIT` overrides it if ChatGPT changes its
+limit; longer content belongs in a `.md` file attachment). Also: `timeoutMs`
+clamped to **5 s – 10 min**, at most **50** concurrent in-flight requests,
+WebSocket messages up to **10 MB**, and a **30 s** server-side heartbeat that
+terminates connections which stop answering pings (`BRIDGE_HEARTBEAT_MS=0`
+disables) — a half-open TCP connection can no longer sit green while requests
+black-hole.
+
+Note on `/api/chat` semantics: transport-level success always answers HTTP
+**200** — the business result is in the JSON body's `ok` field (`false` =
+timeout / not sent / capture failure). Read `ok`, not just the status code.
+Non-200 codes are reserved for relay-level rejections: 403 auth, 413 too
+large, 503 no extension / busy.
 
 If you change the port, update the extension too (see `background.js`
 `DEFAULT_RELAY_URL`, or set `chrome.storage.local` `relayUrl`).
@@ -220,7 +236,16 @@ curl -s http://127.0.0.1:8742/health -H "x-bridge-token: your-secret"
   `hello` handshake. Null extension fields mean a pre-1.2.11 extension (or
   nothing) has connected since the relay started. The identity intentionally
   survives a disconnect — "last known" beats "unknown" — so reload the
-  extension (and reconnect) to refresh it.
+  extension (and reconnect) to refresh it. `extension.ageMs` (v1.2.13) tells
+  you how stale that identity is: a large age next to `clients: 1` meant a
+  half-open socket; the relay now pings connections every 30 s and terminates
+  the ones that stop answering, so this failure mode also fails loudly.
+- **Version drift between components** — the relay, the extension and the MCP
+  server each load their version once and drift independently. `curl
+  .../health` shows both builds; `chatgpt_bridge_status` additionally emits a
+  `driftWarning` when they differ (v1.2.13). After changing code: restart the
+  relay (`start-relay.cmd` now kills the stale port owner first) and reload
+  the extension.
 - **`no browser extension connected`** — the relay has no WebSocket client. Load
   the extension and open/log in to chatgpt.com; confirm the relay logged
   `extension connected`.

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Bridge",
-  "version": "1.2.12",
+  "version": "1.2.13",
   "description": "Lets CLI AI tools (Claude Code / Codex / WorkBuddy) talk to ChatGPT in the browser through a local relay.",
   "permissions": ["alarms", "tabs", "scripting", "storage"],
   "host_permissions": [

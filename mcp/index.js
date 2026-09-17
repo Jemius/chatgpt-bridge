@@ -98,16 +98,22 @@ async function checkStatus() {
   try {
     const res = await fetch(RELAY + '/health', { headers: relayHeaders(), signal: AbortSignal.timeout(5000) });
     const data = await res.json().catch(() => ({}));
+    // Version drift self-report (audit F2): the three components load their
+    // versions independently and drift silently. Surface it right in the
+    // status output instead of waiting for someone to curl /health.
+    const relayVersion = (data && data.relay && data.relay.version) || null;
+    const extension = (data && data.extension) || null;
+    const driftWarning = relayVersion && extension && extension.version &&
+        relayVersion !== extension.version
+      ? `version drift: relay ${relayVersion} != extension ${extension.version} — restart the relay (start-relay.cmd) and reload the extension`
+      : undefined;
     return {
       relayRunning: true,
       extensionConnected: !!(data && data.clients > 0),
       clientCount: (data && data.clients) || 0,
-      // Version visibility (v1.2.11+): pass the relay's own build and the last
-      // reported extension identity through verbatim, so "which build is
-      // actually running" is answerable from the status tool too. Null
-      // extension fields mean a pre-1.2.11 extension (or none) has connected.
-      relayVersion: (data && data.relay && data.relay.version) || null,
-      extension: (data && data.extension) || null
+      relayVersion,
+      extension,
+      driftWarning
     };
   } catch {
     return {

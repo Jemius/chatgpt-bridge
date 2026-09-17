@@ -55,6 +55,23 @@ const MAX_WS_PAYLOAD = 10 * 1024 * 1024;
 // otherwise stack unbounded pending entries (each holding timers + memory).
 const MAX_PENDING = 50;
 
+// Composer length wall, measured against the real web UI on 2026-09-18
+// (external audit F1): ChatGPT's composer silently rejects pastes at
+// >= 10000 chars, so a request in the old 9,999..204,800 blind zone died in
+// the browser with a misleading "composer is empty" error. Fail fast HERE
+// instead. Override with BRIDGE_COMPOSER_LIMIT if the web UI changes its
+// limit (it floats with ChatGPT frontend versions).
+const COMPOSER_LIMIT = Number(process.env.BRIDGE_COMPOSER_LIMIT || 10000);
+
+// Server-side heartbeat interval (audit F3): a half-open TCP connection
+// (sleep/wake, network switch) keeps clients.size===1 forever and silently
+// swallows requests until the full timeout. Ping every interval; a client
+// that missed the previous ping is terminated, which fires 'close', cleans
+// the client set and fails pending requests with a clear error instead of a
+// black hole. Browsers answer protocol-level pings automatically, so the
+// extension needs no changes. Set BRIDGE_HEARTBEAT_MS=0 to disable.
+const HEARTBEAT_MS = Number(process.env.BRIDGE_HEARTBEAT_MS || 30000);
+
 // Connected extension WebSocket clients. The relay only needs ONE client (the
 // browser extension), but multiple may connect briefly (e.g. several browser
 // profiles). Requests are delivered to the first connected client only.
@@ -92,11 +109,17 @@ function failAllPending(error) {
 // ---- Access control --------------------------------------------------------
 // The HOST header check only applies when the relay is actually bound to a
 // loopback address (the default); a deliberately LAN-bound relay stays usable.
-const HOST_IS_LOOPBACK = /^(127\.|localhost|\[::1\]|::1)/i.test(HOST);
-
+// Audit F5: both checks now share ONE matcher, and it accepts the whole 127/8
+// loopback range (RFC-standardized as loopback) — the old pair locked the
+// relay out entirely when bound to e.g. 127.0.0.2 (check enabled, every Host
+// header rejected, self-inflicted 403s). Hostnames like 127.0.0.1.evil.com
+// still fail on the $ anchor.
 function isLoopbackHost(host) {
-  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host || '');
+  return /^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|\[::1\]|::1)(:\d+)?$/i.test(host || '');
 }
+
+// Function declarations hoist, so referencing isLoopbackHost here is safe.
+const HOST_IS_LOOPBACK = isLoopbackHost(HOST);
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;                       // non-browser client (curl, Node, ...)
@@ -140,7 +163,12 @@ const server = http.createServer((req, res) => {
       clients: clients.size,
       pending: pending.size,
       relay: { version: RELAY_VERSION },
-      extension: extInfo
+      extension: {
+        ...extInfo,
+        // Audit F3: make "connected a while ago" distinguishable from "alive
+        // now" at a glance — ageMs counts since the last hello (null = none).
+        ageMs: extInfo.seenAt == null ? null : Date.now() - extInfo.seenAt
+      }
     });
   }
 
@@ -178,6 +206,15 @@ const server = http.createServer((req, res) => {
 
       const message = String(input.message || '');
       if (!message) return sendJson(res, 400, { ok: false, error: 'message is required' });
+      if (message.length > COMPOSER_LIMIT) {
+        // Audit F1: the web-UI composer rejects >= ~10000 chars. Fail here,
+        // loudly and accurately, instead of letting the browser fail later
+        // with "composer is empty" (which points at the wrong cause).
+        return sendJson(res, 413, {
+          ok: false,
+          error: `message too long for the ChatGPT composer (${message.length} chars; the web UI rejects >= ${COMPOSER_LIMIT}). Shorten it or send the content as a .md file attachment instead. If ChatGPT changes its limit, override with BRIDGE_COMPOSER_LIMIT.`
+        });
+      }
       if (message.length > MAX_MESSAGE) {
         return sendJson(res, 413, {
           ok: false,
@@ -192,7 +229,11 @@ const server = http.createServer((req, res) => {
         ? `(${message.length} chars)`
         : message.slice(0, 80);
       console.log(`[relay] chat request: ${reqDesc} (clients=${clients.size})`);
-      if (clients.size === 0) {
+      // Audit F4: judge by OPEN sockets, not raw set size — a set full of
+      // CLOSING/CLOSED entries used to pass this gate and then fall through
+      // the delivery loop into a silent black hole.
+      const hasOpenClient = [...clients].some((ws) => ws.readyState === 1);
+      if (!hasOpenClient) {
         return sendJson(res, 503, {
           ok: false,
           error: 'no browser extension connected — load the extension and open chatgpt.com'
@@ -236,8 +277,18 @@ const server = http.createServer((req, res) => {
 
         // Deliver to a single client to avoid duplicate sends when multiple
         // browser profiles each have the extension connected.
+        let sent = false;
         for (const ws of clients) {
-          if (ws.readyState === 1) { ws.send(payload); break; }
+          if (ws.readyState === 1) { ws.send(payload); sent = true; break; }
+        }
+        if (!sent) {
+          // Audit F4: the gate above checked OPEN sockets, but between then
+          // and here a socket could have started closing — fail LOUDLY (and
+          // clean up the just-registered pending entry) instead of hanging
+          // until the full timeout with no error at all.
+          pending.delete(id);
+          clearTimeout(timer);
+          resolve({ ok: false, error: 'no OPEN extension connection to deliver the request — reload the extension and retry' });
         }
       });
 
@@ -296,6 +347,8 @@ server.on('upgrade', (req, socket, head) => {
 
 wss.on('connection', (ws) => {
   clients.add(ws);
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
   console.log(`[relay] extension connected (${clients.size} client(s))`);
 
   ws.on('message', (data) => {
@@ -355,9 +408,30 @@ wss.on('connection', (ws) => {
   ws.on('error', () => clients.delete(ws));
 });
 
+// Server-side heartbeat (audit F3): see HEARTBEAT_MS above. A client that
+// misses one ping is terminated on the NEXT tick (so a single lost frame
+// doesn't kill anyone) — browsers answer protocol pings automatically, so a
+// live extension never trips this. terminate() fires 'close', which removes
+// the client and fails pending requests with a clear error instead of the
+// old "green /health, requests black-holed for 10 minutes" failure mode.
+if (HEARTBEAT_MS > 0) {
+  const heartbeat = setInterval(() => {
+    for (const ws of clients) {
+      if (ws.isAlive === false) {
+        console.log('[relay] heartbeat timeout — terminating a dead connection');
+        try { ws.terminate(); } catch (e) {}
+        continue;
+      }
+      ws.isAlive = false;
+      try { ws.ping(); } catch (e) {}
+    }
+  }, HEARTBEAT_MS);
+  heartbeat.unref();
+}
+
 server.listen(PORT, HOST, () => {
-  console.log(`[relay] WebSocket: ws://${HOST}:${PORT}/ws`);
-  console.log(`[relay] HTTP API:  http://${HOST}:${PORT}/api/chat`);
+  console.log(`[relay] v${RELAY_VERSION} — WebSocket: ws://${HOST}:${PORT}/ws`);
+  console.log(`[relay] HTTP API:  http://${HOST}:${PORT}/api/chat (heartbeat: ${HEARTBEAT_MS > 0 ? HEARTBEAT_MS + 'ms' : 'off'})`);
 });
 
 // Graceful shutdown: answer every pending caller with a clear error instead of
@@ -373,3 +447,14 @@ function shutdown() {
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+// Audit F4 follow-up: since Node v15 an unhandled rejection crashes the
+// process by default — any small async slip would turn into a silent bridge
+// death (the extension then sits on a dead port with no hint). The relay is
+// a local single-purpose service: log loudly and keep serving.
+process.on('unhandledRejection', (err) => {
+  console.error('[relay] unhandled rejection:', err && (err.stack || err));
+});
+process.on('uncaughtException', (err) => {
+  console.error('[relay] uncaught exception:', err && (err.stack || err));
+});

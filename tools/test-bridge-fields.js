@@ -63,10 +63,11 @@ for (const [label, file, re] of chain) {
 const mcpSrc = read('mcp/index.js');
 assert(/serverInfo:\s*\{\s*name:\s*'chatgpt-bridge',\s*version:\s*PKG\.version\s*\}/.test(mcpSrc),
   'mcp serverInfo version comes from package.json (no hardcoded drift)');
-assert(/relayVersion:\s*\(data && data\.relay && data\.relay\.version\)\s*\|\|\s*null/.test(mcpSrc),
-  'mcp status forwards relayVersion from /health');
-assert(/extension:\s*\(data && data\.extension\)\s*\|\|\s*null/.test(mcpSrc),
-  'mcp status forwards extension identity from /health');
+assert(/relayVersion,\s*\n\s*extension,\s*\n\s*driftWarning/.test(mcpSrc) &&
+  /data && data\.relay && data\.relay\.version/.test(mcpSrc) && /data && data\.extension/.test(mcpSrc),
+  'mcp status forwards relayVersion + extension identity from /health');
+assert(/driftWarning/.test(mcpSrc) && /version drift:/.test(mcpSrc),
+  'mcp status reports version drift between relay and extension (audit F2)');
 
 // Version sources must agree: package.json, manifest.json, package-lock.json.
 const pkg = JSON.parse(read('package.json'));
@@ -76,6 +77,29 @@ assert(pkg.version === manifest.version,
   `package.json (${pkg.version}) === manifest.json (${manifest.version})`);
 assert(pkg.version === lock.packages[''].version,
   `package.json (${pkg.version}) === package-lock.json (${lock.packages[''].version})`);
+
+// ---- relay loopback matcher (audit F5) --------------------------------------
+// The two loopback checks must share ONE matcher that accepts the whole 127/8
+// range: the old pair enabled Host validation for HOST=127.0.0.2 but then
+// rejected every Host header it produced (self-lockout). Slice the real
+// function out of server.js and eval it, so the behavior — not a copy — is
+// what gets tested.
+const serverSrc = read('relay/server.js');
+const fnMatch = serverSrc.match(/function isLoopbackHost\(host\) \{[\s\S]*?\n\}/);
+assert(!!fnMatch, 'isLoopbackHost found in relay/server.js');
+assert(/const HOST_IS_LOOPBACK = isLoopbackHost\(HOST\);/.test(serverSrc),
+  'HOST_IS_LOOPBACK reuses isLoopbackHost (single source, audit F5)');
+if (fnMatch) {
+  const isLoopbackHost = new Function(`return (${fnMatch[0]});`)();
+  assert(isLoopbackHost('127.0.0.1:8742') === true, 'loopback: 127.0.0.1:8742 accepted');
+  assert(isLoopbackHost('127.0.0.2:8742') === true, 'loopback: 127.0.0.2:8742 accepted (whole 127/8, F5)');
+  assert(isLoopbackHost('localhost:8742') === true, 'loopback: localhost:8742 accepted');
+  assert(isLoopbackHost('[::1]:8742') === true, 'loopback: [::1]:8742 accepted');
+  assert(isLoopbackHost('evil.com') === false, 'loopback: evil.com rejected');
+  assert(isLoopbackHost('127.0.0.1.evil.com') === false, 'loopback: DNS-rebinding variant rejected');
+  assert(isLoopbackHost('') === false && isLoopbackHost(undefined) === false,
+    'loopback: empty/undefined rejected');
+}
 
 console.log(`\ntest-bridge-fields: ${passed} passed, ${failures.length} failed`);
 if (failures.length) process.exitCode = 1;

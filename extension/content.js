@@ -185,10 +185,18 @@
   // the bridge reported "not sent" while ChatGPT delivered the message anyway,
   // and the next request then inherited half-composed state. The window now
   // scales with the remaining request budget (floor 12s, cap 60s).
-  async function submitWithConfirmation(requestId, confirmBudgetMs) {
+  async function submitWithConfirmation(requestId, confirmBudgetMs, messageLen) {
     const editor = $(SELECTORS.editor);
     if (!editor) throw new Error('ChatGPT composer not found');
-    if (!(editor.innerText || '').trim()) throw new Error('composer is empty — the message was not pasted');
+    if (!(editor.innerText || '').trim()) {
+      // Audit F1: the web UI silently refuses to paste very long messages
+      // (measured wall: >= 10000 chars), which surfaces here as an "empty"
+      // composer and used to point debugging at paste/clipboard issues.
+      throw new Error('composer is empty — the message was not pasted' +
+        (messageLen
+          ? ` (message length ${messageLen}; the ChatGPT web UI rejects >= ~10000 chars — shorten it or send the content as a .md file attachment)`
+          : ''));
+    }
 
     const form = editor.closest('form');
     const canSubmitForm = form && typeof form.requestSubmit === 'function';
@@ -625,7 +633,7 @@
 
       setEditorText(request.message);
       await sleep(300);
-      await submitWithConfirmation(requestId, deadline - Date.now() - 25000);
+      await submitWithConfirmation(requestId, deadline - Date.now() - 25000, (request.message || '').length);
       const sentAt = Date.now(); // submit confirmed — reply waits and N-16 diagnostics are relative to this
 
       // The relay hands us an absolute deadline (its own timeout). EVERYTHING
