@@ -64,12 +64,17 @@ const MAX_PENDING = 50;
 // typo in BRIDGE_COMPOSER_LIMIT used to silently DISABLE the composer guard
 // entirely, and BRIDGE_HEARTBEAT_MS=abc silently disabled the heartbeat.
 // Invalid values now fall back with a loud startup warning.
+// Tester re-check round 2 (R2): negative values are rejected too — they have
+// no legal meaning for either variable (a negative heartbeat silently turned
+// the heartbeat off, a negative composer limit made every message 413 with
+// an absurd "rejects >= -1" message). 0 stays legal (it disables the
+// heartbeat by design).
 function envNumber(name, fallback) {
   const raw = process.env[name];
   if (raw == null || raw === '') return fallback;
   const n = Number(raw);
-  if (!Number.isFinite(n)) {
-    console.error(`[relay] ignoring invalid ${name}="${raw}" (not a number) — using ${fallback}`);
+  if (!Number.isFinite(n) || n < 0) {
+    console.error(`[relay] ignoring invalid ${name}="${raw}" (must be a non-negative number) — using ${fallback}`);
     return fallback;
   }
   return n;
@@ -458,16 +463,20 @@ if (HEARTBEAT_MS > 0) {
   heartbeat.unref();
 }
 
-// Freshness of the live link: ms since the most recent WebSocket pong across
-// connected clients (null = no client / no pong yet). This is the number that
-// should be SMALL on a healthy connection — ageMs (time since hello) is the
-// connection's AGE and legitimately grows large on a long-lived link.
+// Freshness of the live link: ms since the OLDEST recent WebSocket pong
+// across connected clients (null = no client / no pong yet). Taking the min
+// on purpose (tester re-check round 2, R4): the newest pong (max) would let
+// ONE healthy client mask an unhealthy one in a multi-client setup — the
+// freshness signal should reflect the worst link, not the best. This is the
+// number that should be SMALL on a healthy connection; ageMs (time since
+// hello) is the connection's AGE and legitimately grows large on a
+// long-lived link.
 function lastPongMs() {
-  let latest = 0;
+  let oldest = 0;
   for (const ws of clients) {
-    if (ws.lastPongAt && ws.lastPongAt > latest) latest = ws.lastPongAt;
+    if (ws.lastPongAt && (oldest === 0 || ws.lastPongAt < oldest)) oldest = ws.lastPongAt;
   }
-  return latest ? Date.now() - latest : null;
+  return oldest ? Date.now() - oldest : null;
 }
 
 server.listen(PORT, HOST, () => {

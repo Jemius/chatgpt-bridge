@@ -268,9 +268,10 @@ async function main() {
     // NaN the guard into silence (Number('abc')=NaN, `length > NaN` is always
     // false) — a typo disabled the wall with zero feedback. Now: loud startup
     // warning + fallback to the default wall. Spawn a second relay on :8798
-    // with the poisoned env and prove both.
+    // with the poisoned env and prove both. Round 2 (R2): negative values are
+    // rejected too (BRIDGE_HEARTBEAT_MS=-5 silently turned the heartbeat off).
     const badChild = spawn(process.execPath, [path.join(ROOT, 'relay', 'server.js')], {
-      env: { ...process.env, PORT: '8798', BRIDGE_COMPOSER_LIMIT: 'abc' },
+      env: { ...process.env, PORT: '8798', BRIDGE_COMPOSER_LIMIT: 'abc', BRIDGE_HEARTBEAT_MS: '-5' },
       stdio: ['ignore', 'pipe', 'pipe']
     });
     const badLogs = [];
@@ -292,6 +293,8 @@ async function main() {
         'bad env (BRIDGE_COMPOSER_LIMIT=abc): guard falls back to default, 10000 -> 413');
       assert(badLogs.join('').includes('ignoring invalid BRIDGE_COMPOSER_LIMIT'),
         'bad env value logs a loud startup warning');
+      assert(badLogs.join('').includes('ignoring invalid BRIDGE_HEARTBEAT_MS'),
+        'negative BRIDGE_HEARTBEAT_MS rejected with a warning too (R2)');
     } finally {
       try { badChild.kill(); } catch (e) {}
     }

@@ -107,10 +107,15 @@ async function checkStatus() {
     // null — that used to silence the warning entirely, yet it is exactly the
     // drift most worth shouting about (an unidentifiable extension on a known
     // relay). A null extension version now warns too.
+    // Tester re-check round 2 (R5): with NO extension ever connected the old
+    // message still said "reload the extension" — the right advice there is
+    // "load it and open chatgpt.com".
     const driftWarning = !relayVersion
       ? undefined
       : (!extension || extension.version == null)
-        ? 'version drift: extension did not report a version (pre-1.2.11 extension?) — reload the extension so it identifies itself'
+        ? ((data && data.clients > 0)
+          ? 'version drift: the connected extension did not report a version (pre-1.2.11 extension?) — reload the extension so it identifies itself'
+          : 'version drift: no extension has connected since the relay started — load the extension and open chatgpt.com')
         : (relayVersion !== extension.version)
           ? `version drift: relay ${relayVersion} != extension ${extension.version} — restart the relay (start-relay.cmd) and reload the extension`
           : undefined;

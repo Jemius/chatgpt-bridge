@@ -208,7 +208,19 @@ async function handleChat(msg) {
     } catch (e) {} // no binding info: nothing to rebind — submit normally
     if (boundConversationId) {
       const t = await chrome.tabs.get(tab.id).catch(() => null);
-      if (t && t.url && !t.url.includes('/c/' + boundConversationId)) {
+      // Tester re-check round 2 (R3): the LAST fall-through — if tabs.get
+      // failed (or returned no usable URL) the code skipped rebinding
+      // entirely and submitted on whatever page was open, unable to even
+      // tell which conversation that would hit. Unknown state now fails
+      // loudly instead of gambling on the current page.
+      if (!t || !t.url) {
+        respond(msg.id, {
+          type: 'error',
+          error: 'cannot read the ChatGPT tab state (tabs.get returned nothing usable) — the request was NOT submitted to avoid posting into an unknown conversation (retry)'
+        });
+        return;
+      }
+      if (!t.url.includes('/c/' + boundConversationId)) {
         // Tester re-check (2026-09-18): the outer catch(e){} used to swallow
         // navigation plumbing errors (tabs.get/tabs.update throwing) and let
         // the request fall through to a submit on the CURRENT page — the

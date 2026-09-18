@@ -67,8 +67,8 @@ assert(/relayVersion,\s*\n\s*extension,\s*\n\s*driftWarning/.test(mcpSrc) &&
   /data && data\.relay && data\.relay\.version/.test(mcpSrc) && /data && data\.extension/.test(mcpSrc),
   'mcp status forwards relayVersion + extension identity from /health');
 assert(/driftWarning/.test(mcpSrc) && /version drift:/.test(mcpSrc) &&
-  /did not report a version/.test(mcpSrc),
-  'mcp status reports version drift — including a pre-1.2.11 null-version extension (tester re-check)');
+  /did not report a version/.test(mcpSrc) && /no extension has connected/.test(mcpSrc),
+  'mcp status reports version drift — incl. null-version and never-connected extensions (R5/R6)');
 
 // Version sources must agree: package.json, manifest.json, package-lock.json.
 const pkg = JSON.parse(read('package.json'));
