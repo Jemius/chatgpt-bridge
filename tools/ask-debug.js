@@ -13,7 +13,7 @@
 //
 // Usage:
 //   node tools/ask-debug.js <message-file> [timeoutMs] [conversation]
-//   node tools/ask-debug.js ../.workbuddy-ai/tmp/t-mid.txt
+//   node tools/ask-debug.js message.txt
 //
 // Requires the extension to be reloaded AND the ChatGPT tab refreshed (see
 // README Troubleshooting, protocol-version handshake), otherwise `rawSample`
