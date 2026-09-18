@@ -103,9 +103,17 @@ const STATUS_TOOL = {
 // version differences degrade to an informational notice.
 function evaluateDrift(data) {
   const relayVersion = (data && data.relay && data.relay.version) || null;
-  const relayWire = (data && data.relay && data.relay.wireProtocol) || null; // null = pre-1.2.18 relay
+  const relayWire = (data && data.relay && data.relay.wireProtocol) ?? null; // null = pre-1.2.18 relay
   const extension = (data && data.extension) || null;
-  const extWire = (extension && extension.wireProtocol) || null; // null = pre-1.2.18 extension
+  const extWire = (extension && extension.wireProtocol) ?? null; // null = pre-1.2.18 extension
+  // E1 (tester round 5, v1.2.19): both wire reads use ?? not || — wireProtocol
+  // 0 is a LEGAL protocol number (counters conventionally start at 0), and
+  // `0 || null` swallowed it into "not reported": a real wire mismatch then
+  // passed silently (false negative — exactly the failure D1 exists to catch)
+  // and the equal-0 case got the wrong "predates wire tagging" message. The
+  // relay side already normalizes with `== null ? null : String(...)` (keeps
+  // 0); the downstream || was undoing that defense. Cases ⑨/⑩ in
+  // test-bridge-fields.js pin both behaviors.
   // Tester re-check (2026-09-18): a pre-1.2.11 extension reports version
   // null — that used to silence the warning entirely, yet it is exactly the
   // drift most worth shouting about (an unidentifiable extension on a known

@@ -111,6 +111,19 @@ if (driftMatch) {
   const g = evaluateDrift({ relay: { version: '1.2.18', wireProtocol: 1 }, extension: { version: '1.2.18', wireProtocol: '1' }, clients: 1 });
   assert(g.driftWarning === undefined && g.versionNotice === undefined,
     'identical builds: no warning, no notice');
+  // E1 (tester round 5, v1.2.19): wireProtocol 0 is a LEGAL protocol number
+  // (counters conventionally start at 0). The old `|| null` swallowed it into
+  // "not reported" — ⑨ was a silent false negative (a REAL wire mismatch
+  // passed with no warning; exactly the failure D1 exists to catch) and ⑩
+  // produced a wrong "predates wire-protocol tagging" message. Both are red
+  // under `||` and green under `??` — the domain gap the tester named: cases
+  // (a)-(g) only fed truthy wire numbers, so they could never see this.
+  const h9 = evaluateDrift({ relay: { version: '1.2.19', wireProtocol: 0 }, extension: { version: '1.2.19', wireProtocol: '1' }, clients: 1 });
+  assert(/wire protocol MISMATCH/.test(h9.driftWarning || ''),
+    'E1 ⑨: relay wire 0 vs extension wire 1 -> MISMATCH fires (0 is a real number, not "unreported")');
+  const h10 = evaluateDrift({ relay: { version: '1.2.19', wireProtocol: 0 }, extension: { version: '1.2.20', wireProtocol: '0' }, clients: 1 });
+  assert(h10.driftWarning === undefined && /informational only/.test(h10.versionNotice || ''),
+    'E1 ⑩: both wire 0 + versions differ -> versionNotice only, no false "predates" message');
 }
 
 // Version sources must agree: package.json, manifest.json, package-lock.json.

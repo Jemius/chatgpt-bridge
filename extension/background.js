@@ -78,7 +78,10 @@ function sendHello(sock) {
     chrome.storage.local.get({ extProtocol: null }, (r) => {
       try {
         if (sock.readyState !== WebSocket.OPEN) return;
-        sock.send(JSON.stringify({ type: 'hello', version, protocol: r.extProtocol || null, wireProtocol: BRIDGE_WIRE_PROTOCOL }));
+        // E1 (v1.2.19): ?? not || — extProtocol is a protocol NUMBER stored as
+        // a string; || would swallow a future 0. Same pattern as the wire
+        // reads in mcp/index.js evaluateDrift.
+        sock.send(JSON.stringify({ type: 'hello', version, protocol: r.extProtocol ?? null, wireProtocol: BRIDGE_WIRE_PROTOCOL }));
       } catch (e) {}
     });
   } catch (e) {
