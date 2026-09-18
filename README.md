@@ -1,88 +1,84 @@
 # ChatGPT Bridge
 
-Let CLI AI tools — **Claude Code**, **Codex**, **WorkBuddy**, and any MCP client —
-send messages to **ChatGPT in your browser** and receive the Markdown reply back.
-No API key required: it reuses your existing logged-in ChatGPT session.
+让命令行 AI 工具——**Claude Code**、**Codex**、**WorkBuddy** 以及任何 MCP 客户端——
+把消息发送到**你浏览器里的 ChatGPT**，并取回 Markdown 格式的回复。
+无需 API key：它复用你已有的 ChatGPT 登录会话。
 
-A typical use is a **planner–executor loop**: the AI asks ChatGPT for a project
-plan, gets it back as Markdown, does the work, submits the result for review,
-and gets the next task — all through the browser.
+典型用法是**规划–执行循环**：AI 向 ChatGPT 要一份项目计划，拿到 Markdown 回复，
+本地完成工作后把结果交回给它审阅，再领下一个任务——全程通过浏览器完成。
 
 ```
-AI tool (Claude Code / Codex / WorkBuddy)
-   │  MCP (tools: chatgpt_send, chatgpt_bridge_status)
+AI 工具 (Claude Code / Codex / WorkBuddy)
+   │  MCP (工具: chatgpt_send, chatgpt_bridge_status)
    ▼
-MCP server (mcp/index.js, stdio)      ← reads .md files, saves results
+MCP 服务 (mcp/index.js, stdio)          ← 读取 .md 文件、保存结果
    │  HTTP POST /api/chat
    ▼
-Relay (relay/server.js, 127.0.0.1:8742)  ← WebSocket /ws + HTTP /api/chat
+中继 Relay (relay/server.js, 127.0.0.1:8742)  ← WebSocket /ws + HTTP /api/chat
    │  WebSocket
    ▼
-Browser extension (extension/, MV3)     ← background WS client, content script automation
-   │  DOM automation + fetch interception
+浏览器扩展 (extension/, MV3)             ← background 是 WS 客户端，content script 负责 DOM 自动化
+   │  DOM 自动化 + fetch 拦截
    ▼
-ChatGPT web (chatgpt.com)              ← paste/send, read reply from the network
+ChatGPT 网页 (chatgpt.com)              ← 粘贴/发送，从网络层读取回复
 ```
 
-## Why "bridge the browser" instead of the API
+## 为什么「桥接浏览器」而不走 API
 
-ChatGPT's web UI has features that aren't always available (or are differently
-priced) via the API, and it reuses a session you already have. The trade-off is
-that it's a DOM/network automation against a frequently-changing frontend, and it
-carries the usual automation risks (see **Disclaimer**).
+ChatGPT 网页版的部分功能在 API 上并不总是可用（或定价不同），而且它复用你
+已有的会话。代价是：这是一套针对频繁变化前端的 DOM/网络自动化，带有自动化
+操作的固有风险（见**免责声明**）。
 
-## Architecture
+## 架构
 
-| Component | Path | Role |
-|-----------|------|------|
-| Relay | `relay/server.js` | Local HTTP + WebSocket server that queues requests and matches replies. |
-| MCP server | `mcp/index.js` | Stdio MCP server exposing `chatgpt_send` and `chatgpt_bridge_status`. |
-| Extension background | `extension/background.js` | WebSocket client; routes requests to the ChatGPT tab. |
-| Extension content | `extension/content.js` | DOM automation: paste message, submit, capture attachments. |
-| Extension injected | `extension/injected.js` | MAIN-world script that hooks `fetch` to read the streaming reply. |
-| Tools | `tools/` | `test-parse.js` + `test-artifacts.js` + `test-protocol.js` + `test-netdiag.js` + `test-health.js` (unit tests incl. the cross-file protocol-version pair check and a spawn-a-relay `/health` integration test, `npm test`), `ask.js` / `ask-debug.js` (CLI helpers for testing the bridge end-to-end). |
+| 组件 | 路径 | 职责 |
+|------|------|------|
+| 中继 Relay | `relay/server.js` | 本地 HTTP + WebSocket 服务，排队请求并匹配回复。 |
+| MCP 服务 | `mcp/index.js` | stdio MCP 服务，暴露 `chatgpt_send` 和 `chatgpt_bridge_status`。 |
+| 扩展 background | `extension/background.js` | WebSocket 客户端；把请求路由到 ChatGPT 标签页。 |
+| 扩展 content | `extension/content.js` | DOM 自动化：粘贴消息、提交、抓取附件。 |
+| 扩展 injected | `extension/injected.js` | MAIN world 脚本，挂钩 `fetch` 以读取流式回复。 |
+| 工具 | `tools/` | `test-parse.js` + `test-artifacts.js` + `test-protocol.js` + `test-netdiag.js` + `test-health.js`（单元测试，含跨文件协议版本配对检查和一个会拉起中继进程的 `/health` 集成测试，`npm test`），`ask.js` / `ask-debug.js`（端到端联调 CLI 工具）。 |
 
-The key design decision: the **reply is read from the network layer** (by
-intercepting ChatGPT's `fetch` calls) rather than by scraping page class names,
-which ChatGPT changes frequently and broke repeatedly during development.
+关键设计决策：**回复从网络层读取**（拦截 ChatGPT 的 `fetch` 调用），而不是
+扒页面 class 名——后者 ChatGPT 经常改，开发期间已经反复弄坏过。
 
-## Quick start
+## 快速开始
 
-### 1. Install and start the relay
+### 1. 安装并启动中继
 
 ```bash
 cd chatgpt-bridge
-npm install        # installs the single dependency (ws)
-npm start          # or double-click start-relay.cmd on Windows
+npm install        # 安装唯一依赖 (ws)
+npm start          # Windows 下也可双击 start-relay.cmd
 ```
 
-Keep it running. You should see:
+保持它运行。你应该看到：
 
 ```
 [relay] WebSocket: ws://127.0.0.1:8742/ws
 [relay] HTTP API:  http://127.0.0.1:8742/api/chat
 ```
 
-### 2. Load the extension
+### 2. 加载扩展
 
-1. Open `chrome://extensions` (or `edge://extensions`).
-2. Enable **Developer mode**.
-3. Click **Load unpacked** and select the `extension/` folder.
-4. Open https://chatgpt.com and log in.
+1. 打开 `chrome://extensions`（或 `edge://extensions`）。
+2. 开启**开发者模式**。
+3. 点**加载已解压的扩展程序**，选择 `extension/` 文件夹。
+4. 打开 https://chatgpt.com 并登录。
 
-The relay should now log `extension connected`.
+中继此时应记录 `extension connected`。
 
-> **Tip — dedicated browser profile.** To keep the AI's conversation from
-> mixing with your own, load the extension in a **separate browser profile** (or
-> a separate browser), ideally with its own ChatGPT account. The bridge also
-> remembers the conversation it is working in and navigates back to it on
-> `continue`, so it won't pollute your other chats.
+> **建议——使用独立浏览器配置。** 为了避免 AI 的对话混入你自己的聊天，
+> 请在**单独的浏览器配置文件**（或单独的浏览器）里加载扩展，最好用独立的
+> ChatGPT 账号。桥接也会记住它正在使用的会话，`continue` 时会自动导航回
+> 那个会话，不会污染你的其他聊天。
 
-### 3. Wire the MCP into your AI tool
+### 3. 把 MCP 接入你的 AI 工具
 
-The MCP server is `mcp/index.js` (Node, stdio, zero dependencies).
+MCP 服务是 `mcp/index.js`（Node，stdio，零依赖）。
 
-- **WorkBuddy** — add to `~/.workbuddy/mcp.json`:
+- **WorkBuddy** — 加入 `~/.workbuddy/mcp.json`：
   ```json
   {
     "mcpServers": {
@@ -96,39 +92,37 @@ The MCP server is `mcp/index.js` (Node, stdio, zero dependencies).
 - **Claude Code** — `claude mcp add chatgpt-bridge -- node "C:\path\to\chatgpt-bridge\mcp\index.js"`
 - **Codex** — `codex mcp add chatgpt-bridge -- node "C:\path\to\chatgpt-bridge\mcp\index.js"`
 
-> If `node` isn't on PATH for the tool, use an absolute path such as
-> `C:\Program Files\nodejs\node.exe`.
+> 如果该工具的 PATH 里没有 `node`，请用绝对路径，例如
+> `C:\Program Files\nodejs\node.exe`。
 
-### 4. Test
+### 4. 测试
 
-⚠️ **Do NOT validate the bridge with a short message** (`ping` → `Pong!`). Short
-replies only ever produce one stream fragment, so they look fine even when the
-reply path is broken. Always validate with a request that forces a LONG reply:
+⚠️ **不要用短消息验证桥接**（`ping` → `Pong!`）。短回复只会产生一个流片段，
+即使回复链路已经断了看起来也一切正常。请始终用强制**长回复**的请求验证：
 
 ```bash
 curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -d '{"message":"从1数到30，用逗号分隔，只输出数字。"}'
 ```
 
-You should get back all of `1,2,...,30`. If the reply comes back truncated,
-re-run with `"debug":true` added to the body — the result then also includes
-`rawSample` (the first 20k chars of the raw captured stream) and `rawLen`, which
-show exactly what the network layer saw.
+你应该取回完整的 `1,2,...,30`。如果回复被截断，在请求体里加上 `"debug":true`
+重跑——结果会额外包含 `rawSample`（原始捕获流的前 2 万字符）和 `rawLen`，
+能看出网络层到底看到了什么。
 
-Offline unit tests for the parser (no browser needed):
+解析器的离线单元测试（无需浏览器）：
 
 ```bash
 npm test
 ```
 
-## Tools
+## 工具
 
 ### `chatgpt_send(message, file?, conversation?, timeoutMs?, saveTo?, debug?)`
 
-Sends a message and returns a JSON object:
+发送一条消息并返回 JSON 对象：
 
 ```json
 {
-  "reply": "ChatGPT's reply as Markdown",
+  "reply": "ChatGPT 的回复（Markdown）",
   "attachments": [{ "filename": "plan.md", "content": "# Plan\n..." }],
   "failed": [{ "filename": "x.md", "error": "attachment read timed out after 15000ms (canvas did not open or showed no new content; canvases before=1 after=1 newOrChanged=0)" }],
   "blockedFeatures": [{ "name": "file_upload", "resetsAfter": "2026-09-18T01:03:13Z", "description": "你目前已用完附件额度。" }],
@@ -136,258 +130,209 @@ Sends a message and returns a JSON object:
 }
 ```
 
-`blockedFeatures` is non-empty when ChatGPT itself blocked a feature for the
-account (typically the attachment quota: `"name": "file_upload"` with a
-`resetsAfter` timestamp and a human-readable `description`). Check it before
-assuming the model ignored an uploaded file or declined to produce one — the
-reply text alone looks like a normal answer in that case.
+`blockedFeatures` 非空表示 ChatGPT 自己对该账号屏蔽了某项功能（通常是附件
+额度：`"name": "file_upload"`，带 `resetsAfter` 时间戳和人类可读的
+`description`）。在断定「模型无视了上传的文件」或「拒绝产出附件」之前先看
+它——这种情况下仅看回复文本像一条正常回答。
 
-| Arg | Description |
-|-----|-------------|
-| `message` (required) | The message to send. |
-| `file` | Optional absolute path to a `.md` file to upload (e.g. a result for review). Only `.md`. |
-| `conversation` | `new` to start a fresh chat (first message of a work session), `continue` (default) to keep the bound conversation. |
-| `timeoutMs` | Max wait in ms (default 240000, clamped to 5 s – 10 minutes). |
-| `saveTo` | Optional path; saves the reply there and any attachments into the same folder. Collision-safe: a file that already exists on disk (or repeats within one run) gets a numeric suffix — `plan.md` → `plan (1).md` — instead of being overwritten. |
-| `debug` | Diagnostic mode: the result also contains `rawSample` (first 20k chars of the raw captured stream) and `rawLen`. Use only when debugging reply truncation or parsing. |
+| 参数 | 说明 |
+|------|------|
+| `message`（必填） | 要发送的消息。 |
+| `file` | 可选，要上传的 `.md` 文件的绝对路径（例如待审阅的结果）。仅支持 `.md`。 |
+| `conversation` | `new` 开新会话（工作阶段的第一条消息），`continue`（默认）沿用已绑定的会话。 |
+| `timeoutMs` | 最长等待毫秒数（默认 240000，钳制到 5 秒 – 10 分钟）。 |
+| `saveTo` | 可选路径；把回复保存到该路径，附件存入同一文件夹。防覆盖：磁盘上已存在的文件（或同一次运行内重复的文件名）会加数字后缀——`plan.md` → `plan (1).md`——而不是被覆盖。 |
+| `debug` | 诊断模式：结果额外包含 `rawSample`（原始捕获流前 2 万字符）和 `rawLen`。仅在排查回复截断或解析问题时使用。 |
 
 ### `chatgpt_bridge_status()`
 
-Checks whether the relay is running and whether an extension is connected —
-**without sending anything to ChatGPT**. Use this instead of probing with a test
-message. If the relay is down, it returns the exact command to start it. It also
-forwards the version-visibility fields (`relayVersion`, and `extension` with its
-`version` / `protocol` / `wireProtocol` / `seenAt` / `ageMs`), so "which build is
-actually running" is answerable from the status tool itself.
+检查中继是否在运行、扩展是否已连接——**不向 ChatGPT 发送任何东西**。用这个
+代替测试消息探测。中继未启动时，它直接返回启动命令。它还转发版本可见性
+字段（`relayVersion`，以及 `extension` 的 `version` / `protocol` /
+`wireProtocol` / `seenAt` / `ageMs`），「实际跑的是哪个构建」在 status 工具
+里就能回答。
 
-Since v1.2.18, `driftWarning` is driven by the **relay-axis wire protocol
-numbers** (`RELAY_WIRE_PROTOCOL` in the relay vs `BRIDGE_WIRE_PROTOCOL` in the
-extension), not by semver: equal numbers mean frame-compatible, whatever the
-versions say — a version difference between wire-compatible builds surfaces as
-an informational `versionNotice`, not an alarm. A warning fires only when the
-numbers actually differ (real frame-shape incompatibility — restart the relay
-AND reload the extension), when one side predates wire-protocol tagging, or
-when the extension cannot identify itself at all. Rule for maintainers: bump
-BOTH wire numbers together whenever the relay<->extension frame shapes change
-incompatibly.
+自 v1.2.18 起，`driftWarning`（版本漂移告警）由 **relay 轴线协议号**
+（中继侧的 `RELAY_WIRE_PROTOCOL` 对比扩展侧的 `BRIDGE_WIRE_PROTOCOL`）驱动，
+而不是 semver：号相等即帧兼容，版本字符串说了不算——线协议兼容的构建之间
+版本不同只会产生提示性的 `versionNotice`，不是告警。只有号真的不同（真正的
+帧形状不兼容——重启中继**并且**重载扩展）、某一侧早于线协议号标记、或扩展
+完全无法自报身份时才告警。维护者规则：relay↔extension 帧形状发生不兼容变更
+时，两个线协议号必须一起 bump。
 
-## Recommended agent workflow (default)
+## 推荐的 agent 工作流（默认）
 
-Two round-trips are enough for the planner-executor loop. Do NOT ping-pong
-with the web UI at every step — every extra round costs real time and tokens.
+规划–执行循环两轮往返就够。不要每一步都和网页 UI 打乒乓——每一轮都消耗
+真实时间和 token。
 
-1. **Ask for the plan** — `chatgpt_send` with the requirement (omit
-   `conversation`; the default `continue` binds the chat).
-2. **Do the work locally.**
-3. **Submit the result** — `chatgpt_send` again, still on the default
-   `continue`, into the SAME conversation: a short summary in the message,
-   long content as a `.md` file attachment. ChatGPT reviews it. Done.
+1. **要计划** — 用 `chatgpt_send` 发需求（不传 `conversation`；默认
+   `continue` 会绑定会话）。
+2. **本地干活。**
+3. **交结果** — 再次 `chatgpt_send`，仍用默认 `continue`，进同一个会话：
+   消息里放简短总结，长内容用 `.md` 文件附件。ChatGPT 审阅。完成。
 
-Rules of thumb:
+经验法则：
 
-- **Never pass `conversation: "new"` between steps 1 and 3.** `new` starts a
-  fresh chat, throws away the plan context, and re-pays for it in tokens.
-  Only use `new` for a genuinely different task, or when the user explicitly
-  asks for a fresh chat.
-- `continue` re-opens the bound conversation automatically, even after the
-  tab was closed or navigated away.
-- Don't send `hello`/`test` probes — `chatgpt_bridge_status` is free and
-  answers connectivity (plus version-drift warnings).
-- If a request fails with a session-rebinding error, just retry; the bridge
-  refuses to submit into the wrong page rather than silently starting a new
-  chat.
+- **第 1 步和第 3 步之间绝不传 `conversation: "new"`。** `new` 开新聊天，
+  丢掉计划上下文，还要再花一遍 token。只有真正换任务、或用户明确要求新
+  会话时才用 `new`。
+- `continue` 会自动重新打开绑定的会话，即使标签页被关闭或导航走了。
+- 不要发 `hello`/`test` 探测——`chatgpt_bridge_status` 免费且能回答连通性
+  （还有版本漂移告警）。
+- 请求失败并报会话重绑（session-rebinding）错误时，直接重试即可；桥接宁可
+  拒绝提交也不会悄悄发进错误的页面另起新会话。
 
-## Auto-recovery (fresh-page retry, v1.2.17)
+## 自动恢复（整页刷新重试，v1.2.17）
 
-When a request dies BEFORE the submit step — stale page protocol, the
-composer never appeared, the file-upload input is missing — the extension now
-heals itself: it reloads the ChatGPT tab (which reloads `injected.js` with the
-page and re-creates the composer), verifies the tab is still on the bound
-conversation, and retries the submit **once**. The caller sees nothing unless
-the retry also fails.
+当请求在**提交步骤之前**死掉——页面协议过时、composer（输入框）始终没出现、
+文件上传入口缺失——扩展现在会自愈：重载 ChatGPT 标签页（`injected.js` 随
+页面重新加载、composer 重新创建），确认标签页仍在绑定的会话上，然后重试
+提交**一次**。调用方什么都感知不到，除非重试也失败。
 
-Hard limits, on purpose:
+有意设置的硬性限制：
 
-- **One retry per request, never more.** No refresh loops.
-- **Only pre-submit failures are retried.** These are the failures where the
-  bridge can prove nothing was sent. Once the submit button may have gone
-  through, the error is treated as "possibly sent" and is NEVER retried
-  automatically — a blind resend could post the same message twice.
-- **Budget-gated.** The retry only happens when at least 45 s of the request
-  deadline remain (reload + page load + composer wait can eat ~40 s);
-  otherwise the original error is returned untouched.
-- **Conversation-gated.** After the reload the tab must be back on the bound
-  conversation (`/c/<id>`); if it isn't, the retry is skipped and the error
-  says so.
+- **每个请求最多重试一次，绝不循环刷新。**
+- **只重试「提交前」的失败。** 这些是桥接能证明「什么都没发出去」的失败。
+  一旦提交按钮可能已经生效，错误就按「可能已发送」处理，**绝不**自动重试
+  ——盲发可能把同一条消息发两遍。
+- **预算门。** 只有请求 deadline 还剩至少 45 秒时才重试（刷新 + 页面加载 +
+  等 composer 可能吃掉约 40 秒）；否则原样返回原始错误。
+- **会话门。** 刷新后标签页必须回到绑定的会话（`/c/<id>`）；没回去就放弃
+  重试，错误信息会说明。
 
-A retried-and-failed error carries the suffix "(auto-recovery: the page was
-reloaded and retried once — same error recurred)" so you can tell it apart
-from a no-retry failure.
+重试过且仍失败的超时错误会带后缀 "(auto-recovery: the page was reloaded and
+retried once — same error recurred)"，方便与未重试的失败区分。
 
-## Configuration
+## 配置
 
-| Env var | Default | Meaning |
-|---------|---------|---------|
-| `PORT` | `8742` | Relay port (WebSocket + HTTP). |
-| `HOST` | `127.0.0.1` | Bind address. **Keep it localhost.** |
-| `BRIDGE_RELAY` | `http://127.0.0.1:8742` | Relay URL the MCP server calls. |
-| `BRIDGE_TOKEN` | _(unset)_ | Optional shared secret. When set, HTTP clients must send it as the `x-bridge-token` header and the extension must store it (see Security below). |
-| `BRIDGE_LOG_BODY` | `1` | Set to `0` to keep only the message *length* in relay logs instead of the first 80 characters (useful when message content must not appear in logs). |
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `PORT` | `8742` | 中继端口（WebSocket + HTTP）。 |
+| `HOST` | `127.0.0.1` | 绑定地址。**保持 localhost。** |
+| `BRIDGE_RELAY` | `http://127.0.0.1:8742` | MCP 服务调用的中继 URL。 |
+| `BRIDGE_TOKEN` | _(未设)_ | 可选共享密钥。设置后，HTTP 客户端必须以 `x-bridge-token` 头发送，扩展侧也要存它（见下方 Security）。 |
+| `BRIDGE_LOG_BODY` | `1` | 设为 `0` 让中继日志只保留消息*长度*而不是前 80 字符（消息内容不允许出现在日志里时有用）。 |
 
-Request limits enforced by the relay: request body up to **10 MB**, composer
-message up to **9,999 characters** — this is the measured ChatGPT web-UI wall
-(audit 2026-09-18, boundary re-verified by the tester): the composer silently
-rejects pastes of **>= 10,000** chars with a misleading "composer is empty"
-error, so the relay fails fast with 413 and the real reason
-(`BRIDGE_COMPOSER_LIMIT` overrides it if ChatGPT changes its limit; longer
-content belongs in a `.md` file attachment; an invalid env value falls back
-to the default with a loud startup warning). Also: `timeoutMs` clamped to
-**5 s – 10 min**, at most **50** concurrent in-flight requests, WebSocket
-messages up to **10 MB**, and a **30 s** server-side heartbeat that
-terminates connections which stop answering pings (`BRIDGE_HEARTBEAT_MS=0`
-disables) — a half-open TCP connection can no longer sit green while requests
-black-hole.
+中继强制的请求限额：请求体最大 **10 MB**，composer 消息最多 **9,999 字符**
+——这是实测的 ChatGPT 网页端硬墙（2026-09-18 审计测得，边界经复核）：粘贴
+**>= 10,000** 字符时 composer 静默拒绝并报误导性的 "composer is empty"，所以
+中继直接快速失败返回 413 和真实原因（ChatGPT 若改了限制，可用
+`BRIDGE_COMPOSER_LIMIT` 覆盖；更长的内容应放 `.md` 文件附件；非法的环境变量
+值会响亮警告并回退默认值）。另外：`timeoutMs` 钳制到 **5 秒 – 10 分钟**，
+并发在途请求最多 **50** 个，WebSocket 消息最大 **10 MB**，以及 **30 秒**的
+服务端心跳——停止应答 ping 的连接会被终止（`BRIDGE_HEARTBEAT_MS=0` 可禁用）
+——半开的 TCP 连接再也不能一边挂着绿灯一边把请求黑洞掉。
 
-Note on `/api/chat` semantics: transport-level success always answers HTTP
-**200** — the business result is in the JSON body's `ok` field (`false` =
-timeout / not sent / capture failure). Read `ok`, not just the status code.
-Non-200 codes are reserved for relay-level rejections: 403 auth, 413 too
-large, 503 no extension / busy.
+`/api/chat` 语义说明：传输层成功一律返回 HTTP **200**——业务结果在 JSON 体
+的 `ok` 字段里（`false` = 超时 / 未发出 / 抓取失败）。请读 `ok`，别只看状态
+码。非 200 保留给中继级拒绝：403 鉴权、413 超限、503 无扩展 / 忙碌。
 
-If you change the port, update the extension too (see `background.js`
-`DEFAULT_RELAY_URL`, or set `chrome.storage.local` `relayUrl`).
+改端口的话，扩展也要同步改（见 `background.js` 的 `DEFAULT_RELAY_URL`，或设
+`chrome.storage.local` 的 `relayUrl`）。
 
-## Security
+## 安全
 
-The relay binds to `127.0.0.1` and enforces three defenses out of the box:
+中继绑定 `127.0.0.1`，开箱即带三道防线：
 
-1. **Host check** — the `Host` header must be loopback, which blocks
-   DNS-rebinding attacks.
-2. **Origin check** — requests carrying a browser `Origin` header are only
-   accepted from browser extensions (`chrome-extension://`). Ordinary web pages
-   can therefore neither call the HTTP API nor open the WebSocket — even though
-   browsers don't apply CORS to WebSockets or "simple" POSTs. Non-browser
-   clients (curl, Node) send no `Origin` and are unaffected. Honest scope note:
-   this proves "some extension", not "our extension" — any extension installed
-   in your browser passes the check. If you need isolation beyond the
-   localhost trust boundary, use the token below.
-3. **Optional token** — set `BRIDGE_TOKEN` to require a shared secret:
-   - MCP / HTTP: start the relay **and** the MCP server with the same
-     `BRIDGE_TOKEN` value; the MCP sends it as `x-bridge-token`.
-   - Extension: in the extension's service-worker console run
-     `chrome.storage.local.set({ bridgeToken: 'your-secret' })` — it is
-     appended to the WebSocket URL as `?token=`.
+1. **Host 检查** — `Host` 头必须是 loopback，可阻断 DNS-rebinding 攻击。
+2. **Origin 检查** — 带浏览器 `Origin` 头的请求只接受浏览器扩展来源
+   （`chrome-extension://`）。普通网页因此既调不了 HTTP API 也开不了
+   WebSocket——即使浏览器对 WebSocket 和「简单」POST 不应用 CORS。非浏览器
+   客户端（curl、Node）不带 `Origin`，不受影响。如实的边界说明：这证明的是
+   「某个扩展」，不是「我们的扩展」——你浏览器里装的任何扩展都能过这道检查。
+   若需要超出 localhost 信任边界的隔离，用下面的 token。
+3. **可选 token** — 设置 `BRIDGE_TOKEN` 要求共享密钥：
+   - MCP / HTTP：中继**和** MCP 服务用同一个 `BRIDGE_TOKEN` 值启动；MCP 会
+     以 `x-bridge-token` 头发送。
+   - 扩展：在扩展的 service-worker 控制台执行
+     `chrome.storage.local.set({ bridgeToken: 'your-secret' })`——它会以
+     `?token=` 追加到 WebSocket URL 上。
 
-Remaining risk: any process running under **your own user account** on the same
-machine can still talk to the relay (it has no OS-level identity). That is the
-standard localhost trust boundary; don't run untrusted local software alongside
-it, and never expose the port to the network.
+剩余风险：同一台机器上**你自己用户账户**下的任何进程仍能与中继通信（它没有
+操作系统级身份）。这是标准的 localhost 信任边界；不要在旁边运行不受信任的
+本地软件，也绝不要把端口暴露到网络上。
 
-Test with a token enabled:
+开启 token 后的测试：
 
 ```bash
 curl -s http://127.0.0.1:8742/api/chat -H "Content-Type: application/json" -H "x-bridge-token: your-secret" -d '{"message":"hello"}'
 curl -s http://127.0.0.1:8742/health -H "x-bridge-token: your-secret"
 ```
 
-## Troubleshooting
+## 故障排查
 
-- **"Which build is actually running?"** — `curl http://127.0.0.1:8742/health`
-  answers it directly (v1.2.11+). `relay.version` is the relay build (read from
-  package.json at startup); `extension.version` / `extension.protocol` /
-  `extension.seenAt` are the last identity the extension reported in its WS
-  `hello` handshake. Null extension fields mean a pre-1.2.11 extension (or
-  nothing) has connected since the relay started. The identity intentionally
-  survives a disconnect — "last known" beats "unknown" — so reload the
-  extension (and reconnect) to refresh it. `extension.ageMs` (v1.2.13) is the
-  AGE of that hello — with the heartbeat in place a large ageMs is perfectly
-  healthy for a long-lived connection. The freshness signal is
-  `extension.lastPongMs` (v1.2.15): ms since the last WebSocket pong, which
-  should stay small on a live link. The relay pings connections every 30 s
-  and terminates the ones that stop answering, so a half-open socket fails
-  loudly instead of sitting green.
-- **Version drift between components** — the relay, the extension and the MCP
-  server each load their version once and drift independently. `curl
-  .../health` shows both builds plus the wire-protocol numbers;
-  `chatgpt_bridge_status` emits a `driftWarning` only on a REAL compatibility
-  signal — differing wire-protocol numbers, a build that predates
-  wire-protocol tagging (v1.2.18), or an unidentifiable extension. Version
-  differences between wire-compatible builds are a `versionNotice`
-  (informational), not an alarm — a v1.2.16 relay + v1.2.17 extension once
-  raised a false one. After changing code: restart the relay
-  (`start-relay.cmd` now kills the stale port owner first) and reload the
-  extension.
-- **`no browser extension connected`** — the relay has no WebSocket client. Load
-  the extension and open/log in to chatgpt.com; confirm the relay logged
-  `extension connected`.
-- **`no ChatGPT tab open`** — open a chatgpt.com tab (logged in) and retry.
-- **`content script not ready`** — after an extension reload the tab may lack the
-  script; the bridge auto-injects and retries. If it still fails, reload the tab.
-- **Reply is missing / parse failed** — the backend's streaming format changed.
-  The error will include a raw sample; the parser lives in `extension/injected.js`
-  (`mergeInto` / `collectText` / `assemble`), with unit tests in `tools/test-parse.js`.
-- **`injected.js is an old version` / MAIN world not active** — the extension was
-  reloaded without refreshing the ChatGPT tab; refresh the tab (F5). The content
-  script fails loudly on this protocol-version mismatch instead of silently
-  parsing with stale capture code.
-- **`EADDRINUSE`** — an old relay is still running; stop it first (the relay now
-  prints the exact command).
-- **`message was not sent — no conversation request observed`** — the submit
-  confirmation gave up, usually because a file upload settled slowly (the
-  confirmation window now scales with the remaining request budget, 12–60s).
-  The message MAY actually have been delivered after the check gave up — do
-  not blindly resend. The composer (text + file chips) is cleared
-  automatically after this error, and defensively at the start of the next
-  request, so half-composed state cannot leak into the next conversation.
-- **`timed out waiting for network reply (Ns)`** — the reply stream never
-  completed within the budget. The message may carry a `bridge diagnostics:`
-  suffix (from the page-side network scratchpad). Four states are
-  distinguishable:
-  - `saw HTTP 403 (text/html) … likely a challenge/limit page` — the
-    conversation endpoint answered with a challenge/limit page instead of the
-    stream: refresh the tab, wait, retry later.
+- **「实际跑的是哪个构建？」** — `curl http://127.0.0.1:8742/health` 直接回答
+  （v1.2.11+）。`relay.version` 是中继构建（启动时从 package.json 读取）；
+  `extension.version` / `extension.protocol` / `extension.seenAt` 是扩展在
+  WS `hello` 握手里最后上报的身份。扩展字段为 null 表示中继启动后连上的是
+  pre-1.2.11 扩展（或什么都没连过）。该身份在断开后有意保留——「最后已知」
+  优于「未知」——重载扩展（并重连）即可刷新。`extension.ageMs`（v1.2.13）
+  是这条 hello 的**年龄**——有心跳在，长期连接的大 ageMs 完全健康。新鲜度
+  信号是 `extension.lastPongMs`（v1.2.15）：距最近一次 WebSocket pong 的
+  毫秒数，活链路上应保持很小。中继每 30 秒 ping 一次连接并终止不再应答的
+  连接，半开 socket 会响亮失败而不是挂着绿灯。
+- **组件间版本漂移** — 中继、扩展和 MCP 服务各自只加载一次版本，会各自漂
+  移。`curl .../health` 能看两边的构建加线协议号；`chatgpt_bridge_status`
+  只在**真兼容性信号**上发 `driftWarning`——线协议号不同、构建早于线协议号
+  标记（v1.2.18）、或扩展无法自报身份。线协议兼容构建之间的版本差异只是
+  `versionNotice`（提示），不是告警——v1.2.16 中继 + v1.2.17 扩展曾误报过
+  一次。改完代码：重启中继（`start-relay.cmd` 现在会先杀掉占用端口的旧进程）
+  并重载扩展。
+- **`no browser extension connected`** — 中继没有 WebSocket 客户端。加载扩
+  展并打开/登录 chatgpt.com；确认中继记录了 `extension connected`。
+- **`no ChatGPT tab open`** — 打开一个（已登录的）chatgpt.com 标签页重试。
+- **`content script not ready`** — 扩展重载后标签页可能缺脚本；桥接会自动
+  注入并重试。仍失败就刷新标签页。
+- **回复缺失 / 解析失败** — 后端流格式变了。错误里会带原始流样本；解析器在
+  `extension/injected.js`（`mergeInto` / `collectText` / `assemble`），单元
+  测试在 `tools/test-parse.js`。
+- **`injected.js is an old version` / MAIN world 未激活** — 扩展重载了但
+  ChatGPT 标签页没刷新；刷新标签页（F5）。content script 会在这种协议版本
+  不匹配上响亮失败，而不是用过时的抓取代码静默解析。
+- **`EADDRINUSE`** — 旧中继还在跑；先停掉（中继现在会打印确切命令）。
+- **`message was not sent — no conversation request observed`** — 提交确认
+  放弃了，通常是文件上传落定太慢（确认窗口现在会按剩余请求预算伸缩，
+  12–60 秒）。消息**可能**实际已在检查放弃后送达——不要盲目重发。composer
+  （文本 + 文件 chip）在此错误后会自动清空，并在下个请求开始时防御性再清一
+  次，半成稿状态不会泄漏进下个会话。
+- **`timed out waiting for network reply (Ns)`** — 回复流没能在预算内完成。
+  消息可能带 `bridge diagnostics:` 后缀（来自页面侧网络暂存区）。四种状态
+  可区分：
+  - `saw HTTP 403 (text/html) … likely a challenge/limit page` — 会话端点回
+    的是质询/限额页而不是流：刷新标签页，等一等，稍后重试。
   - `accepted the request (HTTP 200) but sent no chunk at all — the stream
-    went silent` — sent, accepted, then silent (this state used to be
-    indistinguishable from "extension older than v1.2.9").
-  - `N reply chunk(s) received, last Xs ago` — the stream is alive: N large
-    with X small means slow; N frozen with X growing means it stopped.
-  - no suffix — nothing was observed, or the extension is older than v1.2.9.
-- **HTTP 403 from the relay** — a `BRIDGE_TOKEN` is set on the relay but the
-  client didn't send it. Match the token on the MCP (`BRIDGE_TOKEN` env var)
-  and in the extension (`chrome.storage.local.set({ bridgeToken: ... })`).
+    went silent` — 已发送、已接受、然后静默（这个状态曾经与「扩展低于
+    v1.2.9」无法区分）。
+  - `N reply chunk(s) received, last Xs ago` — 流还活着：N 大且 X 小 = 慢；
+    N 冻结且 X 增长 = 停了。
+  - 无后缀 — 什么都没观测到，或扩展低于 v1.2.9。
+- **中继返回 HTTP 403** — 中继设了 `BRIDGE_TOKEN` 但客户端没带。让 MCP
+  （`BRIDGE_TOKEN` 环境变量）和扩展（`chrome.storage.local.set({ bridgeToken: ... })`）
+  两边的 token 一致。
 
-## Known limitations
+## 已知限制
 
-- **`.md` file upload** (`file` arg) relies on the `DataTransfer` trick, which
-  some ChatGPT versions reject. Prefer sending results as text.
-- **Canvas document attachments** (when ChatGPT generates a real `.md` file) are
-  captured best-effort by reading the canvas editor; this can also break when
-  ChatGPT changes its DOM. Each file is clicked once (targets are deduplicated
-  by normalized filename — a "下载 x.md" / "Download x.md" download link and
-  its "x.md" chip are the same file), cards inside your own message — i.e.
-  files you uploaded — are
-  skipped, and every read is bound to its click: only a canvas that is new or
-  changed relative to the pre-click snapshot counts, so a canvas left open by
-  an earlier request can never shadow a later capture. Card selection is bound
-  to the submit too: only cards that appear AFTER the message was submitted are
-  captured, so document cards from earlier turns of a continued conversation
-  are never re-read as this reply's attachments. For a robust loop, ask
-  ChatGPT to output the plan as plain text.
-- ChatGPT-internal citation markers (`filecite …` phrases wrapped in private-use
-  sentinel characters) are stripped from replies before delivery. The same
-  applies to the `:::writing{variant="document" …}` … `:::` canvas directive
-  wrapper that leaks into raw stream text when the answer is produced in
-  document/canvas mode: the wrapper lines are removed and the body is kept
-  (an edge case remains — a bare `:::writing{…}` line inside a fenced code
-  block in the reply body would be stripped too, which is not known to occur).
-- ChatGPT's frontend changes often. The reply path is network-based and more
-  robust than DOM scraping — it survives class-name changes and handles both
-  full-snapshot and `delta_encoding: v1` incremental streams — but any protocol
-  change can still require parser updates. After unusual truncation, run
-  `npm test` and re-check with `debug: true` to capture a raw stream sample.
+- **`.md` 文件上传**（`file` 参数）依赖 `DataTransfer` 技巧，部分 ChatGPT
+  版本会拒绝。尽量以纯文本发送结果。
+- **Canvas 文档附件**（ChatGPT 生成真 `.md` 文件时）通过读取 canvas 编辑器
+  尽力抓取；ChatGPT 改 DOM 时同样可能失效。每个文件只点一次（目标按规范化
+  文件名去重——「下载 x.md」/「Download x.md」下载链接和它的 "x.md" chip 是
+  同一个文件），你自己消息里的卡片——即你上传的文件——会被跳过，且每次读
+  取都绑定到它的点击：只有相对点击前快照是新增或变更的 canvas 才算数，先前
+  请求留下的 canvas 永远不会顶替后面的抓取。卡片选择也绑定到提交：只有消
+  息提交**之后**出现的卡片才被抓取，续接会话中早前轮次的文档卡片绝不会被打
+  成本次回复的附件。要稳的循环，请让 ChatGPT 以纯文本输出计划。
+- ChatGPT 内部的引用标记（包在私用区哨兵字符里的 `filecite …` 短语）会在交
+  付前剥除。答案以文档/canvas 模式产出时泄漏进原始流文本的
+  `:::writing{variant="document" …}` … `:::` 包裹指令同样处理：剥掉包裹行、
+  保留正文（遗留一个边界情况——正文代码围栏里的裸 `:::writing{…}` 行也会被
+  剥掉，目前未知有真实出现）。
+- ChatGPT 前端经常变。回复链路走网络层、比 DOM 扒取健壮——扛得住 class 名
+  变化，同时处理全量快照和 `delta_encoding: v1` 增量流——但协议一变仍可能
+  需要更新解析器。出现异常截断后，跑 `npm test` 并用 `debug: true` 重查以
+  抓一份原始流样本。
 
-## Disclaimer
+## 免责声明
 
-Automating the ChatGPT web UI may violate OpenAI's Terms of Service and carries
-account-risk. Use at your own risk, keep request frequency low, and prefer this
-for personal/experimental use.
+自动化 ChatGPT 网页 UI 可能违反 OpenAI 服务条款并带来账号风险。自担风险使
+用，保持低请求频率，建议仅用于个人/实验用途。
