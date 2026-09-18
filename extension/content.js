@@ -605,12 +605,19 @@
     if (busy) return { error: 'another request is already in progress — try again in a moment.' };
     busy = true;
     // v1.2.17: true until the submit step BEGINS. Errors thrown while this is
-    // true are known NOT to have sent anything (stale protocol, missing
-    // composer, failed upload) — safe for background.js to auto-retry after a
-    // page reload. Once submitWithConfirmation starts, the message MAY
-    // already be on its way, so the flag is dropped permanently for the rest
-    // of the request (N-12: a blind resend could post the message twice).
+    // true are known NOT to have sent the MESSAGE (stale protocol, missing
+    // composer) — safe for background.js to auto-retry after a page reload.
+    // v1.2.18 (tester round 4, D2): that claim only covers the message, not
+    // the FILE. Once uploadFile() succeeded, the file is already in the
+    // conversation's composer — a later failure (e.g. the SPA re-rendered the
+    // composer during the 3s upload wait and setEditorText threw) must NOT be
+    // marked recoverable: a retry would upload the file a SECOND time. Hence
+    // the final recoverable condition is preSubmit && !uploaded below.
+    // Once submitWithConfirmation starts, the message MAY already be on its
+    // way — the flag is dropped for the rest of the request (N-12: a blind
+    // resend could post the message twice).
     let preSubmit = true;
+    let uploaded = false;
     try {
       const stale = protocolError();
       if (stale) throw new Error(stale);
@@ -626,6 +633,9 @@
         if (!uploadFile(request.file)) {
           throw new Error('could not find the file-upload input — update SELECTORS.fileInput');
         }
+        // D2 (v1.2.18): from here the file IS in the conversation — any later
+        // failure must not be auto-retried (a retry would upload it twice).
+        uploaded = true;
         await sleep(3000); // give the upload time; send success is confirmed at the network layer
       }
 
@@ -688,10 +698,12 @@
     } catch (e) {
       try { clearComposer(); } catch (e2) {} // N-12: never leave a half-composed message + file behind
       // v1.2.17: only pre-submit failures carry recoverable — background.js
-      // reloads the tab and retries ONCE on that flag. Post-submit failures
-      // (submit confirmation, network wait, parsing, artifacts) are already
-      // "possibly sent" and never retry.
-      return preSubmit
+      // reloads the tab and retries ONCE on that flag. v1.2.18 (D2): an
+      // already-uploaded file excludes the flag too (a retry would upload it
+      // twice; the caller may retry manually as plain text or fix the page).
+      // Post-submit failures (submit confirmation, network wait, parsing,
+      // artifacts) are already "possibly sent" and never retry.
+      return (preSubmit && !uploaded)
         ? { error: e.message || String(e), recoverable: true }
         : { error: e.message || String(e) };
     } finally {

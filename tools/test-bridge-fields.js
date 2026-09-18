@@ -69,6 +69,49 @@ assert(/relayVersion,\s*\n\s*extension,\s*\n\s*driftWarning/.test(mcpSrc) &&
 assert(/driftWarning/.test(mcpSrc) && /version drift:/.test(mcpSrc) &&
   /did not report a version/.test(mcpSrc) && /no extension has connected/.test(mcpSrc),
   'mcp status reports version drift — incl. null-version and never-connected extensions (R5/R6)');
+// v1.2.18 (tester round 4, D1): the warning must key off the RELAY-AXIS wire
+// protocol numbers, not semver — a pure version difference between
+// wire-compatible builds is a false alarm (live instance: relay 1.2.16 vs
+// extension 1.2.17). The wire numbers exist on both sides and the mcp compares
+// them; equal numbers + different versions degrade to versionNotice.
+assert(/wire protocol MISMATCH/.test(mcpSrc) && /wireProtocol/.test(mcpSrc) &&
+  /versionNotice/.test(mcpSrc) && /informational only, no restart required/.test(mcpSrc),
+  'mcp drift warning keys off wire protocol numbers; equal-number version drift degrades to versionNotice (D1)');
+assert(/BRIDGE_WIRE_PROTOCOL\s*=\s*1/.test(read('extension/background.js')) &&
+  /type: 'hello'.*wireProtocol: BRIDGE_WIRE_PROTOCOL/.test(read('extension/background.js')),
+  'extension hello carries the relay-axis wireProtocol number (BRIDGE_WIRE_PROTOCOL)');
+// v1.2.18 (D1): behavioral test of evaluateDrift — slice the real function out
+// of mcp/index.js and eval it (same pattern as isLoopbackHost above), so the
+// JUDGMENT is pinned, not just the presence of the strings. The first case is
+// the live false alarm from the tester's round 4: relay 1.2.16 + extension
+// 1.2.17, frames byte-identical — the old semver comparison flagged it, the
+// number comparison must stay silent (versionNotice only).
+const driftMatch = mcpSrc.match(/function evaluateDrift\(data\) \{[\s\S]*?\n\}/);
+assert(!!driftMatch, 'evaluateDrift found in mcp/index.js (pure, sliceable decision core)');
+if (driftMatch) {
+  const evaluateDrift = new Function(`return (${driftMatch[0]});`)();
+  const a = evaluateDrift({ relay: { version: '1.2.16', wireProtocol: 1 }, extension: { version: '1.2.17', wireProtocol: '1' }, clients: 1 });
+  assert(a.driftWarning === undefined && /informational only/.test(a.versionNotice || ''),
+    'D1 live false alarm now silent: wire numbers match (1 == "1"), versions differ -> versionNotice only');
+  const b = evaluateDrift({ relay: { version: '1.2.18', wireProtocol: 2 }, extension: { version: '1.2.18', wireProtocol: '1' }, clients: 1 });
+  assert(/wire protocol MISMATCH/.test(b.driftWarning || ''),
+    'wire number mismatch -> hard warning even with EQUAL versions (semver cannot do this)');
+  const c = evaluateDrift({ relay: { version: '1.2.16' }, extension: { version: '1.2.18', wireProtocol: '1' }, clients: 1 });
+  assert(/predates wire-protocol tagging/.test(c.driftWarning || ''),
+    'old relay (no wire number) + version drift -> upgrade hint, not an incompatibility claim');
+  const d = evaluateDrift({ relay: { version: '1.2.18', wireProtocol: 1 }, extension: { version: '1.2.17' }, clients: 1 });
+  assert(/did not report a wire protocol/.test(d.driftWarning || ''),
+    'old extension (no wire number) + version drift -> reload hint');
+  const e = evaluateDrift({ relay: { version: '1.2.18', wireProtocol: 1 }, extension: { version: null, wireProtocol: '1' }, clients: 1 });
+  assert(/did not report a version/.test(e.driftWarning || ''),
+    'null extension version -> R5 warning (pre-1.2.11, unidentifiable)');
+  const f = evaluateDrift({ relay: { version: '1.2.18', wireProtocol: 1 }, extension: null, clients: 0 });
+  assert(/no extension has connected/.test(f.driftWarning || ''),
+    'never-connected -> R5 "load the extension" hint');
+  const g = evaluateDrift({ relay: { version: '1.2.18', wireProtocol: 1 }, extension: { version: '1.2.18', wireProtocol: '1' }, clients: 1 });
+  assert(g.driftWarning === undefined && g.versionNotice === undefined,
+    'identical builds: no warning, no notice');
+}
 
 // Version sources must agree: package.json, manifest.json, package-lock.json.
 const pkg = JSON.parse(read('package.json'));
@@ -86,6 +129,10 @@ assert(pkg.version === lock.packages[''].version,
 // function out of server.js and eval it, so the behavior — not a copy — is
 // what gets tested.
 const serverSrc = read('relay/server.js');
+assert(/RELAY_WIRE_PROTOCOL\s*=\s*1/.test(serverSrc) &&
+  /relay: \{ version: RELAY_VERSION, wireProtocol: RELAY_WIRE_PROTOCOL \}/.test(serverSrc) &&
+  /wireProtocol: msg\.wireProtocol == null \? null : String\(msg\.wireProtocol\)/.test(serverSrc),
+  'relay exposes its wire protocol in /health and records the extension-reported number (D1)');
 const fnMatch = serverSrc.match(/function isLoopbackHost\(host\) \{[\s\S]*?\n\}/);
 assert(!!fnMatch, 'isLoopbackHost found in relay/server.js');
 assert(/const HOST_IS_LOOPBACK = isLoopbackHost\(HOST\);/.test(serverSrc),

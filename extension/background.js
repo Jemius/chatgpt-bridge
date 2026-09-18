@@ -62,6 +62,15 @@ function loadConfig() {
 // If storage is slow or the socket died meanwhile we fall back to a
 // version-only hello — old relays ignore the extra fields, new relays show
 // nulls as "not reported".
+// v1.2.18 (tester round 4, D1): the extension's report of the RELAY-AXIS wire
+// protocol it speaks. The page axis has PROTOCOL/EXPECTED_PROTOCOL; this is
+// the same idea for the relay<->extension frames. Bump BOTH this and
+// RELAY_WIRE_PROTOCOL in relay/server.js whenever those frame shapes or
+// semantics change incompatibly. driftWarning (mcp) keys off this number —
+// package versions alone never triggered a real incompatibility, only false
+// alarms on internal-refactor releases.
+const BRIDGE_WIRE_PROTOCOL = 1;
+
 function sendHello(sock) {
   let version = null;
   try { version = chrome.runtime.getManifest().version; } catch (e) {}
@@ -69,13 +78,13 @@ function sendHello(sock) {
     chrome.storage.local.get({ extProtocol: null }, (r) => {
       try {
         if (sock.readyState !== WebSocket.OPEN) return;
-        sock.send(JSON.stringify({ type: 'hello', version, protocol: r.extProtocol || null }));
+        sock.send(JSON.stringify({ type: 'hello', version, protocol: r.extProtocol || null, wireProtocol: BRIDGE_WIRE_PROTOCOL }));
       } catch (e) {}
     });
   } catch (e) {
     try {
       if (sock.readyState === WebSocket.OPEN) {
-        sock.send(JSON.stringify({ type: 'hello', version, protocol: null }));
+        sock.send(JSON.stringify({ type: 'hello', version, protocol: null, wireProtocol: BRIDGE_WIRE_PROTOCOL }));
       }
     } catch (e2) {}
   }

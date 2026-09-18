@@ -93,6 +93,63 @@ const STATUS_TOOL = {
   inputSchema: { type: 'object', properties: {} }
 };
 
+// v1.2.18 (tester round 4, D1): pure decision core for the drift warning,
+// sliced and behavior-tested in tools/test-bridge-fields.js — the JUDGMENT is
+// pinned, not just the presence of the strings. The relay-axis WIRE PROTOCOL
+// numbers are the real compatibility signal: semver was only ever a proxy and
+// raised a live false alarm on relay 1.2.16 + extension 1.2.17 (frames
+// byte-identical, internal-control-flow release) while a real frame break
+// inside a patch bump would have stayed silent. Equal numbers => compatible;
+// version differences degrade to an informational notice.
+function evaluateDrift(data) {
+  const relayVersion = (data && data.relay && data.relay.version) || null;
+  const relayWire = (data && data.relay && data.relay.wireProtocol) || null; // null = pre-1.2.18 relay
+  const extension = (data && data.extension) || null;
+  const extWire = (extension && extension.wireProtocol) || null; // null = pre-1.2.18 extension
+  // Tester re-check (2026-09-18): a pre-1.2.11 extension reports version
+  // null — that used to silence the warning entirely, yet it is exactly the
+  // drift most worth shouting about (an unidentifiable extension on a known
+  // relay). A null extension version now warns too.
+  // Tester re-check round 2 (R5): with NO extension ever connected the old
+  // message still said "reload the extension" — the right advice there is
+  // "load it and open chatgpt.com".
+  let driftWarning;
+  let versionNotice;
+  if (!relayVersion) {
+    driftWarning = undefined;
+  } else if (!extension || extension.version == null) {
+    driftWarning = ((data && data.clients > 0))
+      ? 'version drift: the connected extension did not report a version (pre-1.2.11 extension?) — reload the extension so it identifies itself'
+      : 'version drift: no extension has connected since the relay started — load the extension and open chatgpt.com';
+  } else {
+    const versionDiffers = relayVersion !== extension.version;
+    const wiresMatch = relayWire != null && extWire != null && String(relayWire) === String(extWire);
+    if (relayWire != null && extWire != null && !wiresMatch) {
+      // Numbers differ = the one real incompatibility signal.
+      driftWarning = `wire protocol MISMATCH: relay speaks ${relayWire}, extension speaks ${extWire} — restart the relay (start-relay.cmd) and reload the extension (frame shapes may be incompatible)`;
+    } else if (relayWire == null) {
+      // Old relay: no wire number to compare. A version difference is still
+      // worth an upgrade hint — restarting restores drift detection — but it
+      // is NOT evidence of incompatibility (v1.2.16 relay + 1.2.17 extension
+      // were byte-compatible).
+      driftWarning = versionDiffers
+        ? `relay build predates wire-protocol tagging (relay ${relayVersion}, extension ${extension.version}) — restart the relay to restore protocol-level drift detection`
+        : undefined;
+    } else if (extWire == null) {
+      driftWarning = versionDiffers
+        ? `extension did not report a wire protocol (pre-1.2.18 build? relay ${relayVersion}, extension ${extension.version}) — reload the extension`
+        : undefined;
+    } else {
+      // Wire numbers match: compatible, whatever the versions say.
+      driftWarning = undefined;
+    }
+    versionNotice = (wiresMatch && versionDiffers)
+      ? `versions differ (relay ${relayVersion}, extension ${extension.version}) but the wire protocol matches (${relayWire}) — informational only, no restart required`
+      : undefined;
+  }
+  return { driftWarning, versionNotice };
+}
+
 // Query the relay's /health endpoint. Never touches ChatGPT.
 async function checkStatus() {
   try {
@@ -103,29 +160,15 @@ async function checkStatus() {
     // status output instead of waiting for someone to curl /health.
     const relayVersion = (data && data.relay && data.relay.version) || null;
     const extension = (data && data.extension) || null;
-    // Tester re-check (2026-09-18): a pre-1.2.11 extension reports version
-    // null — that used to silence the warning entirely, yet it is exactly the
-    // drift most worth shouting about (an unidentifiable extension on a known
-    // relay). A null extension version now warns too.
-    // Tester re-check round 2 (R5): with NO extension ever connected the old
-    // message still said "reload the extension" — the right advice there is
-    // "load it and open chatgpt.com".
-    const driftWarning = !relayVersion
-      ? undefined
-      : (!extension || extension.version == null)
-        ? ((data && data.clients > 0)
-          ? 'version drift: the connected extension did not report a version (pre-1.2.11 extension?) — reload the extension so it identifies itself'
-          : 'version drift: no extension has connected since the relay started — load the extension and open chatgpt.com')
-        : (relayVersion !== extension.version)
-          ? `version drift: relay ${relayVersion} != extension ${extension.version} — restart the relay (start-relay.cmd) and reload the extension`
-          : undefined;
+    const { driftWarning, versionNotice } = evaluateDrift(data);
     return {
       relayRunning: true,
       extensionConnected: !!(data && data.clients > 0),
       clientCount: (data && data.clients) || 0,
       relayVersion,
       extension,
-      driftWarning
+      driftWarning,
+      versionNotice
     };
   } catch {
     return {

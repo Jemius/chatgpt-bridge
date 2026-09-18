@@ -123,6 +123,7 @@ async function main() {
     const h0 = await waitFor((h) => h && h.ok === true, 'relay up');
     if (child.exitCode !== null) throw new Error('relay exited early (port in use?) — see logs');
     assert(h0.relay && h0.relay.version === PKG.version, 'relay.version matches package.json');
+    assert(h0.relay && h0.relay.wireProtocol === 1, 'relay.wireProtocol is the relay-axis wire protocol number (D1, v1.2.18)');
     assert(h0.extension && h0.extension.version === null, 'initial extension.version is null');
     assert(h0.extension.protocol === null, 'initial extension.protocol is null');
     assert(h0.extension.seenAt === null, 'initial extension.seenAt is null');
@@ -133,10 +134,11 @@ async function main() {
     let ws = await wsConnect();
     await waitFor((h) => h.clients === 1, 'ws client counted');
     assert((await getHealth()).clients === 1, 'clients === 1 after connect');
-    ws.send(JSON.stringify({ type: 'hello', version: '9.9.9-test', protocol: '7' }));
+    ws.send(JSON.stringify({ type: 'hello', version: '9.9.9-test', protocol: '7', wireProtocol: '1' }));
     const h2 = await waitFor((h) => h.extension.version === '9.9.9-test', 'hello recorded');
     assert(h2.extension.version === '9.9.9-test', 'hello version recorded');
     assert(h2.extension.protocol === '7', 'hello protocol recorded');
+    assert(h2.extension.wireProtocol === '1', 'hello wireProtocol recorded (relay-axis number, distinct from page-axis protocol)');
     assert(typeof h2.extension.seenAt === 'number' && h2.extension.seenAt > 0, 'hello seenAt set');
     assert(typeof h2.extension.ageMs === 'number' && h2.extension.ageMs < 5000,
       'hello ageMs is a small fresh number');
@@ -164,6 +166,7 @@ async function main() {
     const h5 = await waitFor((h) => h.extension.version === null, 'empty hello resets version');
     assert(h5.extension.version === null, 'empty hello -> version null (old extension)');
     assert(h5.extension.protocol === null, 'empty hello -> protocol null (old extension)');
+    assert(h5.extension.wireProtocol === null, 'empty hello -> wireProtocol null (old extension)');
     assert(h5.extension.seenAt > seenAt2, 'empty hello refreshes seenAt');
     ws.close();
 

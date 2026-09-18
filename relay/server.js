@@ -113,10 +113,21 @@ const pending = new Map();
 // during past debugging rounds).
 const RELAY_VERSION = require('../package.json').version;
 
+// v1.2.18 (tester round 4, D1): the relay-axis WIRE PROTOCOL number — the one
+// thing semver was wrongly standing in for. driftWarning compared package
+// versions, so a pure internal-refactor release (1.2.16 relay + 1.2.17
+// extension, frames byte-identical) raised a live false alarm while a real
+// frame-shape break inside one semver patch would have stayed silent. Rule,
+// mirroring the page axis (PROTOCOL/EXPECTED_PROTOCOL): bump BOTH this and
+// BRIDGE_WIRE_PROTOCOL in extension/background.js whenever the relay<->extension
+// frame shapes or semantics change incompatibly. Version strings stay visible
+// but carry no warning power of their own.
+const RELAY_WIRE_PROTOCOL = 1;
+
 // Last reported extension identity from the WS `hello` handshake. Null fields
 // mean "an extension connected that does not send version info yet" (pre-1.2.11
 // builds). Kept after disconnect on purpose: "last known" beats "unknown".
-let extInfo = { version: null, protocol: null, seenAt: null };
+let extInfo = { version: null, protocol: null, wireProtocol: null, seenAt: null };
 
 function sendJson(res, status, obj) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -190,7 +201,7 @@ const server = http.createServer((req, res) => {
       ok: true,
       clients: clients.size,
       pending: pending.size,
-      relay: { version: RELAY_VERSION },
+      relay: { version: RELAY_VERSION, wireProtocol: RELAY_WIRE_PROTOCOL },
       extension: {
         ...extInfo,
         // Audit F3: make "connected a while ago" distinguishable from "alive
@@ -396,9 +407,12 @@ wss.on('connection', (ws) => {
       extInfo = {
         version: typeof msg.version === 'string' ? msg.version : null,
         protocol: msg.protocol == null ? null : String(msg.protocol),
+        // v1.2.18 (D1): relay-axis wire protocol reported by the extension
+        // (null = pre-1.2.18 extension, cannot be drift-checked by number).
+        wireProtocol: msg.wireProtocol == null ? null : String(msg.wireProtocol),
         seenAt: Date.now()
       };
-      console.log(`[relay] extension hello: version=${extInfo.version} protocol=${extInfo.protocol}`);
+      console.log(`[relay] extension hello: version=${extInfo.version} protocol=${extInfo.protocol} wire=${extInfo.wireProtocol}`);
       return;
     }
 

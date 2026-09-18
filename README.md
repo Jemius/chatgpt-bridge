@@ -157,11 +157,19 @@ Checks whether the relay is running and whether an extension is connected —
 **without sending anything to ChatGPT**. Use this instead of probing with a test
 message. If the relay is down, it returns the exact command to start it. It also
 forwards the version-visibility fields (`relayVersion`, and `extension` with its
-`version` / `protocol` / `seenAt` / `ageMs`), so "which build is actually
-running" is answerable from the status tool itself — and since v1.2.13 it emits
-a `driftWarning` whenever the relay build and the extension build differ, so
-version drift surfaces on the next status check instead of hiding until
-someone curls /health.
+`version` / `protocol` / `wireProtocol` / `seenAt` / `ageMs`), so "which build is
+actually running" is answerable from the status tool itself.
+
+Since v1.2.18, `driftWarning` is driven by the **relay-axis wire protocol
+numbers** (`RELAY_WIRE_PROTOCOL` in the relay vs `BRIDGE_WIRE_PROTOCOL` in the
+extension), not by semver: equal numbers mean frame-compatible, whatever the
+versions say — a version difference between wire-compatible builds surfaces as
+an informational `versionNotice`, not an alarm. A warning fires only when the
+numbers actually differ (real frame-shape incompatibility — restart the relay
+AND reload the extension), when one side predates wire-protocol tagging, or
+when the extension cannot identify itself at all. Rule for maintainers: bump
+BOTH wire numbers together whenever the relay<->extension frame shapes change
+incompatibly.
 
 ## Recommended agent workflow (default)
 
@@ -300,10 +308,15 @@ curl -s http://127.0.0.1:8742/health -H "x-bridge-token: your-secret"
   loudly instead of sitting green.
 - **Version drift between components** — the relay, the extension and the MCP
   server each load their version once and drift independently. `curl
-  .../health` shows both builds; `chatgpt_bridge_status` additionally emits a
-  `driftWarning` when they differ (v1.2.13). After changing code: restart the
-  relay (`start-relay.cmd` now kills the stale port owner first) and reload
-  the extension.
+  .../health` shows both builds plus the wire-protocol numbers;
+  `chatgpt_bridge_status` emits a `driftWarning` only on a REAL compatibility
+  signal — differing wire-protocol numbers, a build that predates
+  wire-protocol tagging (v1.2.18), or an unidentifiable extension. Version
+  differences between wire-compatible builds are a `versionNotice`
+  (informational), not an alarm — a v1.2.16 relay + v1.2.17 extension once
+  raised a false one. After changing code: restart the relay
+  (`start-relay.cmd` now kills the stale port owner first) and reload the
+  extension.
 - **`no browser extension connected`** — the relay has no WebSocket client. Load
   the extension and open/log in to chatgpt.com; confirm the relay logged
   `extension connected`.
