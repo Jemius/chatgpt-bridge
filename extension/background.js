@@ -205,23 +205,34 @@ async function handleChat(msg) {
     let boundConversationId = null;
     try {
       boundConversationId = (await chrome.storage.local.get('boundConversationId')).boundConversationId;
-    } catch (e) {}
+    } catch (e) {} // no binding info: nothing to rebind — submit normally
     if (boundConversationId) {
-      try {
-        const t = await chrome.tabs.get(tab.id);
-        if (t.url && !t.url.includes('/c/' + boundConversationId)) {
+      const t = await chrome.tabs.get(tab.id).catch(() => null);
+      if (t && t.url && !t.url.includes('/c/' + boundConversationId)) {
+        // Tester re-check (2026-09-18): the outer catch(e){} used to swallow
+        // navigation plumbing errors (tabs.get/tabs.update throwing) and let
+        // the request fall through to a submit on the CURRENT page — the
+        // exact new-conversation failure mode this block exists to prevent.
+        // Every failure past this point now fails loudly instead.
+        try {
           await chrome.tabs.update(tab.id, { url: 'https://chatgpt.com/c/' + boundConversationId });
           await waitForTabLoad(tab.id, 15000);
-          const t2 = await chrome.tabs.get(tab.id).catch(() => null);
-          if (!t2 || !t2.url || !t2.url.includes('/c/' + boundConversationId)) {
-            respond(msg.id, {
-              type: 'error',
-              error: 'session rebinding did not finish: the tab never reached conversation ' + boundConversationId + ' — the request was NOT submitted (retry; if this repeats, open the conversation manually and retry)'
-            });
-            return;
-          }
+        } catch (e) {
+          respond(msg.id, {
+            type: 'error',
+            error: 'session rebinding failed: ' + (e && e.message ? e.message : e) + ' — the request was NOT submitted (retry)'
+          });
+          return;
         }
-      } catch (e) {} // navigation plumbing errors: keep legacy best-effort behavior
+        const t2 = await chrome.tabs.get(tab.id).catch(() => null);
+        if (!t2 || !t2.url || !t2.url.includes('/c/' + boundConversationId)) {
+          respond(msg.id, {
+            type: 'error',
+            error: 'session rebinding did not finish: the tab never reached conversation ' + boundConversationId + ' — the request was NOT submitted (retry; if this repeats, open the conversation manually and retry)'
+          });
+          return;
+        }
+      }
     }
   }
 

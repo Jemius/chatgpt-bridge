@@ -200,13 +200,15 @@ Rules of thumb:
 | `BRIDGE_LOG_BODY` | `1` | Set to `0` to keep only the message *length* in relay logs instead of the first 80 characters (useful when message content must not appear in logs). |
 
 Request limits enforced by the relay: request body up to **10 MB**, composer
-message up to **10,000 characters** — this is the measured ChatGPT web-UI wall
-(audit 2026-09-18): the composer silently rejects longer pastes with a
-misleading "composer is empty" error, so the relay now fails fast with 413 and
-the real reason (`BRIDGE_COMPOSER_LIMIT` overrides it if ChatGPT changes its
-limit; longer content belongs in a `.md` file attachment). Also: `timeoutMs`
-clamped to **5 s – 10 min**, at most **50** concurrent in-flight requests,
-WebSocket messages up to **10 MB**, and a **30 s** server-side heartbeat that
+message up to **9,999 characters** — this is the measured ChatGPT web-UI wall
+(audit 2026-09-18, boundary re-verified by the tester): the composer silently
+rejects pastes of **>= 10,000** chars with a misleading "composer is empty"
+error, so the relay fails fast with 413 and the real reason
+(`BRIDGE_COMPOSER_LIMIT` overrides it if ChatGPT changes its limit; longer
+content belongs in a `.md` file attachment; an invalid env value falls back
+to the default with a loud startup warning). Also: `timeoutMs` clamped to
+**5 s – 10 min**, at most **50** concurrent in-flight requests, WebSocket
+messages up to **10 MB**, and a **30 s** server-side heartbeat that
 terminates connections which stop answering pings (`BRIDGE_HEARTBEAT_MS=0`
 disables) — a half-open TCP connection can no longer sit green while requests
 black-hole.
@@ -262,10 +264,13 @@ curl -s http://127.0.0.1:8742/health -H "x-bridge-token: your-secret"
   `hello` handshake. Null extension fields mean a pre-1.2.11 extension (or
   nothing) has connected since the relay started. The identity intentionally
   survives a disconnect — "last known" beats "unknown" — so reload the
-  extension (and reconnect) to refresh it. `extension.ageMs` (v1.2.13) tells
-  you how stale that identity is: a large age next to `clients: 1` meant a
-  half-open socket; the relay now pings connections every 30 s and terminates
-  the ones that stop answering, so this failure mode also fails loudly.
+  extension (and reconnect) to refresh it. `extension.ageMs` (v1.2.13) is the
+  AGE of that hello — with the heartbeat in place a large ageMs is perfectly
+  healthy for a long-lived connection. The freshness signal is
+  `extension.lastPongMs` (v1.2.15): ms since the last WebSocket pong, which
+  should stay small on a live link. The relay pings connections every 30 s
+  and terminates the ones that stop answering, so a half-open socket fails
+  loudly instead of sitting green.
 - **Version drift between components** — the relay, the extension and the MCP
   server each load their version once and drift independently. `curl
   .../health` shows both builds; `chatgpt_bridge_status` additionally emits a

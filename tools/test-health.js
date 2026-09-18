@@ -8,9 +8,13 @@
 //   5. after a disconnect the last-known identity is kept
 //   6. an old-style empty hello resets the fields to null (pre-1.2.11 compat)
 //   7. an end-to-end result round-trip forwards blockedFeatures (P0 fix guard)
-//   8. composer-length overflow fails fast with 413 from the relay (audit F1)
+//   8. composer wall is boundary-exact: 10000 -> 413, 9999 -> passes (audit
+//      F1 + tester re-check: a guard tested one step outside its boundary is
+//      untested)
 //   9. timeoutMs=1 is clamped: a fast reply beats the timer (no fake timeout)
 //  10. the heartbeat keeps live clients and terminates silent ones (audit F3)
+//  11. a non-numeric BRIDGE_COMPOSER_LIMIT falls back loudly, no NaN silence
+//      (tester re-check)
 //
 // Spawns its own relay instance on PORT=8799 so it never fights the real one.
 'use strict';
@@ -46,6 +50,25 @@ function getHealth() {
     });
     req.on('error', reject);
     req.setTimeout(2000, () => req.destroy(new Error('health timeout')));
+  });
+}
+
+// POST /api/chat and resolve { status, json } — no extension needed for the
+// relay-side rejections (413 composer wall fires before the no-client gate).
+function postChat(base, obj) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(obj);
+    const req = http.request(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    }, (res) => {
+      let b = '';
+      res.on('data', (c) => { b += c; });
+      res.on('end', () => { try { resolve({ status: res.statusCode, json: JSON.parse(b) }); } catch (e) { reject(e); } });
+    });
+    req.on('error', reject);
+    req.setTimeout(3000, () => req.destroy(new Error('post timeout')));
+    req.end(body);
   });
 }
 
@@ -98,6 +121,7 @@ async function main() {
     assert(h0.extension.protocol === null, 'initial extension.protocol is null');
     assert(h0.extension.seenAt === null, 'initial extension.seenAt is null');
     assert(h0.extension.ageMs === null, 'initial extension.ageMs is null');
+    assert(h0.extension.lastPongMs === null, 'initial extension.lastPongMs is null');
 
     // [2] hello with version+protocol is recorded verbatim.
     let ws = await wsConnect();
@@ -110,6 +134,8 @@ async function main() {
     assert(typeof h2.extension.seenAt === 'number' && h2.extension.seenAt > 0, 'hello seenAt set');
     assert(typeof h2.extension.ageMs === 'number' && h2.extension.ageMs < 5000,
       'hello ageMs is a small fresh number');
+    assert(h2.extension.lastPongMs != null && h2.extension.lastPongMs < 2000,
+      'lastPongMs is fresh on a live link (distinct from ageMs)');
 
     // [3] unknown message types must not touch extInfo.
     ws.send(JSON.stringify({ type: 'definitely-not-a-type' }));
@@ -176,26 +202,20 @@ async function main() {
       'end-to-end: blockedFeatures forwarded through /api/chat');
     ws.close();
 
-    // [7] audit F1: the relay must fail FAST on composer-length overflow
-    // (measured web-UI wall ~10000) instead of letting the request die in
-    // the browser with a misleading "composer is empty". Note this happens
-    // BEFORE the no-client gate, so it needs no extension connected.
-    const wallBody = JSON.stringify({ message: 'x'.repeat(10001), timeoutMs: 5000 });
-    const wallRes = await new Promise((resolve, reject) => {
-      const req = http.request(`${BASE}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(wallBody) }
-      }, (res) => {
-        let b = '';
-        res.on('data', (c) => { b += c; });
-        res.on('end', () => { try { resolve({ status: res.statusCode, json: JSON.parse(b) }); } catch (e) { reject(e); } });
-      });
-      req.on('error', reject);
-      req.end(wallBody);
-    });
-    assert(wallRes.status === 413, 'composer wall: 10001 chars -> 413 straight from the relay');
+    // [7] audit F1 + tester re-check (2026-09-18): the wall is INCLUSIVE.
+    // The first cut used `> 10000` and its two test points (10,001 / 9,999)
+    // both sat ONE STEP OUTSIDE the boundary — zero information about the
+    // boundary itself, so exactly-10,000 sailed through to die in the
+    // browser. Both points now sit ON the boundary: 10,000 -> 413, and 9,999
+    // -> falls through the guard (reaching the no-extension 503, NOT 413).
+    // Note the 413 fires BEFORE the no-client gate, so no ws is needed.
+    const wallRes = await postChat(BASE, { message: 'x'.repeat(10000), timeoutMs: 5000 });
+    assert(wallRes.status === 413, 'composer wall: exactly 10000 chars -> 413 (boundary is >=)');
     assert(wallRes.json.ok === false && /composer/i.test(wallRes.json.error || ''),
       'composer wall: error names the composer limit, not "empty composer"');
+    const passRes = await postChat(BASE, { message: 'y'.repeat(9999), timeoutMs: 5000 });
+    assert(passRes.status === 503,
+      'composer wall: 9999 chars passes the guard (no-extension 503, not 413)');
 
     // [8] v1.2.12 clamp behavior — the audit used it to fingerprint the stale
     // relay: timeoutMs=1 must be clamped to 5s so a fast extension reply WINS
@@ -242,6 +262,38 @@ async function main() {
       hb.terminate();
       await waitFor((h) => h.clients === 0, 'socket disconnected');
       console.log('  (i) ws internals unavailable for half-open simulation; fell back to terminate');
+    }
+
+    // [10] tester re-check (2026-09-18): BRIDGE_COMPOSER_LIMIT=abc used to
+    // NaN the guard into silence (Number('abc')=NaN, `length > NaN` is always
+    // false) — a typo disabled the wall with zero feedback. Now: loud startup
+    // warning + fallback to the default wall. Spawn a second relay on :8798
+    // with the poisoned env and prove both.
+    const badChild = spawn(process.execPath, [path.join(ROOT, 'relay', 'server.js')], {
+      env: { ...process.env, PORT: '8798', BRIDGE_COMPOSER_LIMIT: 'abc' },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    const badLogs = [];
+    badChild.stdout.on('data', (c) => badLogs.push(String(c)));
+    badChild.stderr.on('data', (c) => badLogs.push(String(c)));
+    try {
+      let wall2 = null;
+      const t0 = Date.now();
+      for (;;) {
+        try {
+          wall2 = await postChat('http://127.0.0.1:8798', { message: 'x'.repeat(10000), timeoutMs: 1000 });
+          break;
+        } catch (e) {
+          if (Date.now() - t0 > 6000) throw new Error('bad-env relay never came up: ' + (e.message || e));
+          await sleep(100);
+        }
+      }
+      assert(wall2.status === 413,
+        'bad env (BRIDGE_COMPOSER_LIMIT=abc): guard falls back to default, 10000 -> 413');
+      assert(badLogs.join('').includes('ignoring invalid BRIDGE_COMPOSER_LIMIT'),
+        'bad env value logs a loud startup warning');
+    } finally {
+      try { badChild.kill(); } catch (e) {}
     }
 
     console.log(`\ntest-health: ${passed} passed, ${failures.length} failed`);

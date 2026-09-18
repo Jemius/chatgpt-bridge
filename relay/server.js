@@ -40,6 +40,10 @@ const MAX_BODY = 10 * 1024 * 1024;
 
 // Maximum size of a single chat message pasted into the editor (200 KB). Very
 // long content belongs in a .md file attachment, not in the composer.
+// Tester re-check (2026-09-18): with the default COMPOSER_LIMIT (10000) this
+// check is UNREACHABLE — it exists as the absolute ceiling for when
+// BRIDGE_COMPOSER_LIMIT is raised above it (and as defense against
+// pathological env values).
 const MAX_MESSAGE = 200 * 1024;
 
 // Maximum wait time for a single chat request (10 minutes). Prevents a stuck
@@ -55,13 +59,32 @@ const MAX_WS_PAYLOAD = 10 * 1024 * 1024;
 // otherwise stack unbounded pending entries (each holding timers + memory).
 const MAX_PENDING = 50;
 
+// Numeric env parsing with NaN protection (tester re-check 2026-09-18):
+// Number('abc') is NaN, and `length > NaN` / `NaN > 0` are both false — a
+// typo in BRIDGE_COMPOSER_LIMIT used to silently DISABLE the composer guard
+// entirely, and BRIDGE_HEARTBEAT_MS=abc silently disabled the heartbeat.
+// Invalid values now fall back with a loud startup warning.
+function envNumber(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    console.error(`[relay] ignoring invalid ${name}="${raw}" (not a number) — using ${fallback}`);
+    return fallback;
+  }
+  return n;
+}
+
 // Composer length wall, measured against the real web UI on 2026-09-18
-// (external audit F1): ChatGPT's composer silently rejects pastes at
-// >= 10000 chars, so a request in the old 9,999..204,800 blind zone died in
-// the browser with a misleading "composer is empty" error. Fail fast HERE
-// instead. Override with BRIDGE_COMPOSER_LIMIT if the web UI changes its
-// limit (it floats with ChatGPT frontend versions).
-const COMPOSER_LIMIT = Number(process.env.BRIDGE_COMPOSER_LIMIT || 10000);
+// (external audit F1, re-verified by the tester): ChatGPT's composer
+// silently rejects pastes at >= 10000 chars — the longest message that goes
+// through is 9,999. Requests in the old 10,000..204,800 blind zone died in
+// the browser with a misleading "composer is empty" error. The guard below
+// uses >= ON PURPOSE to match that measured wall: exactly COMPOSER_LIMIT
+// chars is already over it. (The first cut used > and let 10,000 through to
+// die in the browser — the boundary itself carried zero test coverage.)
+// Override with BRIDGE_COMPOSER_LIMIT if the web UI changes its limit.
+const COMPOSER_LIMIT = envNumber('BRIDGE_COMPOSER_LIMIT', 10000);
 
 // Server-side heartbeat interval (audit F3): a half-open TCP connection
 // (sleep/wake, network switch) keeps clients.size===1 forever and silently
@@ -70,7 +93,7 @@ const COMPOSER_LIMIT = Number(process.env.BRIDGE_COMPOSER_LIMIT || 10000);
 // the client set and fails pending requests with a clear error instead of a
 // black hole. Browsers answer protocol-level pings automatically, so the
 // extension needs no changes. Set BRIDGE_HEARTBEAT_MS=0 to disable.
-const HEARTBEAT_MS = Number(process.env.BRIDGE_HEARTBEAT_MS || 30000);
+const HEARTBEAT_MS = envNumber('BRIDGE_HEARTBEAT_MS', 30000);
 
 // Connected extension WebSocket clients. The relay only needs ONE client (the
 // browser extension), but multiple may connect briefly (e.g. several browser
@@ -167,7 +190,11 @@ const server = http.createServer((req, res) => {
         ...extInfo,
         // Audit F3: make "connected a while ago" distinguishable from "alive
         // now" at a glance — ageMs counts since the last hello (null = none).
-        ageMs: extInfo.seenAt == null ? null : Date.now() - extInfo.seenAt
+        ageMs: extInfo.seenAt == null ? null : Date.now() - extInfo.seenAt,
+        // Tester re-check (2026-09-18): ageMs is the connection AGE — with a
+        // heartbeat in place, a large ageMs is perfectly healthy. lastPongMs
+        // is the freshness signal that should stay small on a live link.
+        lastPongMs: lastPongMs()
       }
     });
   }
@@ -206,10 +233,11 @@ const server = http.createServer((req, res) => {
 
       const message = String(input.message || '');
       if (!message) return sendJson(res, 400, { ok: false, error: 'message is required' });
-      if (message.length > COMPOSER_LIMIT) {
-        // Audit F1: the web-UI composer rejects >= ~10000 chars. Fail here,
-        // loudly and accurately, instead of letting the browser fail later
-        // with "composer is empty" (which points at the wrong cause).
+      if (message.length >= COMPOSER_LIMIT) {
+        // Audit F1: the web-UI composer rejects >= ~10000 chars (9,999 is the
+        // last length that goes through). The boundary is INCLUSIVE on
+        // purpose — the first cut used > and let exactly 10,000 chars through
+        // to die in the browser. Fail here, loudly and accurately.
         return sendJson(res, 413, {
           ok: false,
           error: `message too long for the ChatGPT composer (${message.length} chars; the web UI rejects >= ${COMPOSER_LIMIT}). Shorten it or send the content as a .md file attachment instead. If ChatGPT changes its limit, override with BRIDGE_COMPOSER_LIMIT.`
@@ -348,7 +376,8 @@ server.on('upgrade', (req, socket, head) => {
 wss.on('connection', (ws) => {
   clients.add(ws);
   ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
+  ws.lastPongAt = Date.now();
+  ws.on('pong', () => { ws.isAlive = true; ws.lastPongAt = Date.now(); });
   console.log(`[relay] extension connected (${clients.size} client(s))`);
 
   ws.on('message', (data) => {
@@ -429,6 +458,18 @@ if (HEARTBEAT_MS > 0) {
   heartbeat.unref();
 }
 
+// Freshness of the live link: ms since the most recent WebSocket pong across
+// connected clients (null = no client / no pong yet). This is the number that
+// should be SMALL on a healthy connection — ageMs (time since hello) is the
+// connection's AGE and legitimately grows large on a long-lived link.
+function lastPongMs() {
+  let latest = 0;
+  for (const ws of clients) {
+    if (ws.lastPongAt && ws.lastPongAt > latest) latest = ws.lastPongAt;
+  }
+  return latest ? Date.now() - latest : null;
+}
+
 server.listen(PORT, HOST, () => {
   console.log(`[relay] v${RELAY_VERSION} — WebSocket: ws://${HOST}:${PORT}/ws`);
   console.log(`[relay] HTTP API:  http://${HOST}:${PORT}/api/chat (heartbeat: ${HEARTBEAT_MS > 0 ? HEARTBEAT_MS + 'ms' : 'off'})`);
@@ -451,10 +492,15 @@ process.on('SIGTERM', shutdown);
 // Audit F4 follow-up: since Node v15 an unhandled rejection crashes the
 // process by default — any small async slip would turn into a silent bridge
 // death (the extension then sits on a dead port with no hint). The relay is
-// a local single-purpose service: log loudly and keep serving.
+// a local single-purpose service: log loudly and keep serving. Known,
+// accepted trade-off (tester re-check 2026-09-18): after an uncaughtException
+// the process state is formally UNKNOWN — if the relay starts misbehaving
+// after one of these log lines, restart it; we keep serving because a dead
+// relay fails every caller with a connection error, while a wedged-but-alive
+// one can be diagnosed via /health.
 process.on('unhandledRejection', (err) => {
   console.error('[relay] unhandled rejection:', err && (err.stack || err));
 });
 process.on('uncaughtException', (err) => {
-  console.error('[relay] uncaught exception:', err && (err.stack || err));
+  console.error('[relay] uncaught exception (state may be undefined — consider restarting the relay):', err && (err.stack || err));
 });

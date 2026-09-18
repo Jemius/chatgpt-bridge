@@ -103,10 +103,17 @@ async function checkStatus() {
     // status output instead of waiting for someone to curl /health.
     const relayVersion = (data && data.relay && data.relay.version) || null;
     const extension = (data && data.extension) || null;
-    const driftWarning = relayVersion && extension && extension.version &&
-        relayVersion !== extension.version
-      ? `version drift: relay ${relayVersion} != extension ${extension.version} — restart the relay (start-relay.cmd) and reload the extension`
-      : undefined;
+    // Tester re-check (2026-09-18): a pre-1.2.11 extension reports version
+    // null — that used to silence the warning entirely, yet it is exactly the
+    // drift most worth shouting about (an unidentifiable extension on a known
+    // relay). A null extension version now warns too.
+    const driftWarning = !relayVersion
+      ? undefined
+      : (!extension || extension.version == null)
+        ? 'version drift: extension did not report a version (pre-1.2.11 extension?) — reload the extension so it identifies itself'
+        : (relayVersion !== extension.version)
+          ? `version drift: relay ${relayVersion} != extension ${extension.version} — restart the relay (start-relay.cmd) and reload the extension`
+          : undefined;
     return {
       relayRunning: true,
       extensionConnected: !!(data && data.clients > 0),
