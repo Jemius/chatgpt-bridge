@@ -189,6 +189,33 @@ Rules of thumb:
   refuses to submit into the wrong page rather than silently starting a new
   chat.
 
+## Auto-recovery (fresh-page retry, v1.2.17)
+
+When a request dies BEFORE the submit step — stale page protocol, the
+composer never appeared, the file-upload input is missing — the extension now
+heals itself: it reloads the ChatGPT tab (which reloads `injected.js` with the
+page and re-creates the composer), verifies the tab is still on the bound
+conversation, and retries the submit **once**. The caller sees nothing unless
+the retry also fails.
+
+Hard limits, on purpose:
+
+- **One retry per request, never more.** No refresh loops.
+- **Only pre-submit failures are retried.** These are the failures where the
+  bridge can prove nothing was sent. Once the submit button may have gone
+  through, the error is treated as "possibly sent" and is NEVER retried
+  automatically — a blind resend could post the same message twice.
+- **Budget-gated.** The retry only happens when at least 45 s of the request
+  deadline remain (reload + page load + composer wait can eat ~40 s);
+  otherwise the original error is returned untouched.
+- **Conversation-gated.** After the reload the tab must be back on the bound
+  conversation (`/c/<id>`); if it isn't, the retry is skipped and the error
+  says so.
+
+A retried-and-failed error carries the suffix "(auto-recovery: the page was
+reloaded and retried once — same error recurred)" so you can tell it apart
+from a no-retry failure.
+
 ## Configuration
 
 | Env var | Default | Meaning |

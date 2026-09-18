@@ -604,6 +604,13 @@
   async function handleChat(request) {
     if (busy) return { error: 'another request is already in progress — try again in a moment.' };
     busy = true;
+    // v1.2.17: true until the submit step BEGINS. Errors thrown while this is
+    // true are known NOT to have sent anything (stale protocol, missing
+    // composer, failed upload) — safe for background.js to auto-retry after a
+    // page reload. Once submitWithConfirmation starts, the message MAY
+    // already be on its way, so the flag is dropped permanently for the rest
+    // of the request (N-12: a blind resend could post the message twice).
+    let preSubmit = true;
     try {
       const stale = protocolError();
       if (stale) throw new Error(stale);
@@ -644,6 +651,10 @@
 
       setEditorText(request.message);
       await sleep(300);
+      // The point of no return: from here the click may already have gone
+      // through, so every later error is "MAY have been sent" and must never
+      // be marked recoverable (see preSubmit above).
+      preSubmit = false;
       await submitWithConfirmation(requestId, deadline - Date.now() - 25000, (request.message || '').length);
       const sentAt = Date.now(); // submit confirmed — reply waits and N-16 diagnostics are relative to this
 
@@ -676,7 +687,13 @@
         : { markdown, attachments, failed, blockedFeatures: net.blockedFeatures || [] };
     } catch (e) {
       try { clearComposer(); } catch (e2) {} // N-12: never leave a half-composed message + file behind
-      return { error: e.message || String(e) };
+      // v1.2.17: only pre-submit failures carry recoverable — background.js
+      // reloads the tab and retries ONCE on that flag. Post-submit failures
+      // (submit confirmation, network wait, parsing, artifacts) are already
+      // "possibly sent" and never retry.
+      return preSubmit
+        ? { error: e.message || String(e), recoverable: true }
+        : { error: e.message || String(e) };
     } finally {
       busy = false;
     }

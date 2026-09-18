@@ -178,6 +178,26 @@ async function sendToTab(tabId, payload) {
   }
 }
 
+// v1.2.17: reload a tab and verify it landed back on the right page. Returns
+// true only when the reload finished AND the URL is still a logged-in-domain
+// ChatGPT page — and still the bound conversation when one is bound (a
+// refresh that dumps us somewhere else must NOT be retried into).
+async function reloadAndVerify(tabId, conversation, boundConversationId) {
+  try {
+    await chrome.tabs.reload(tabId);
+    await waitForTabLoad(tabId, 20000);
+  } catch (e) {
+    return false;
+  }
+  const t = await chrome.tabs.get(tabId).catch(() => null);
+  if (!t || !t.url) return false;
+  if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(t.url)) return false;
+  if (conversation !== 'new' && boundConversationId) {
+    return t.url.includes('/c/' + boundConversationId);
+  }
+  return true;
+}
+
 async function handleChat(msg) {
   let tabs = [];
   try {
@@ -201,8 +221,10 @@ async function handleChat(msg) {
   // conversation instead of continuing the bound one. Verify the tab actually
   // got there; fail loudly with a retry hint instead of submitting into the
   // wrong page (a retry is cheap; a wrong-page submit is not).
+  // Hoisted for the v1.2.17 fresh-page retry: a reload must land back on the
+  // bound conversation, otherwise the retry is abandoned (see handleChat loop).
+  let boundConversationId = null;
   if (msg.conversation !== 'new') {
-    let boundConversationId = null;
     try {
       boundConversationId = (await chrome.storage.local.get('boundConversationId')).boundConversationId;
     } catch (e) {} // no binding info: nothing to rebind — submit normally
@@ -260,10 +282,26 @@ async function handleChat(msg) {
     debug: !!msg.debug
   };
 
-  try {
-    const r = await sendToTab(tab.id, payload);
-    if (r && r.error) respond(msg.id, { type: 'error', error: r.error });
-    else {
+  // v1.2.17: one-shot fresh-page retry. When the content script reports a
+  // PRE-submit failure (recoverable: true — stale page protocol, composer
+  // missing, upload input missing) the message was definitely NOT sent, so
+  // reloading the tab is safe: injected.js reloads with the page (healing
+  // protocol mismatches) and a fresh ChatGPT re-creates the composer.
+  // Guardrails: at most ONE retry, only with enough deadline budget left
+  // (reload + load wait + composer wait can eat ~40s), and only when the
+  // reloaded tab is back on the bound conversation. "MAY have been sent"
+  // failures (submit confirmation and later) never carry the flag and are
+  // never retried (N-12: a blind resend could post the message twice).
+  const RETRY_MIN_BUDGET_MS = 45000;
+  for (let attempt = 0; ; attempt++) {
+    let r = null;
+    try {
+      r = await sendToTab(tab.id, payload);
+    } catch (e) {
+      respond(msg.id, { type: 'error', error: 'content script not ready — reload the ChatGPT tab. (' + (e.message || e) + ')' });
+      return;
+    }
+    if (r && !r.error) {
       respond(msg.id, {
         type: 'result',
         markdown: (r && r.markdown) || '',
@@ -278,9 +316,25 @@ async function handleChat(msg) {
         rawSample: (r && r.rawSample) || undefined,
         rawLen: (r && r.rawLen) || undefined
       });
+      return;
     }
-  } catch (e) {
-    respond(msg.id, { type: 'error', error: 'content script not ready — reload the ChatGPT tab. (' + (e.message || e) + ')' });
+    const errMsg = (r && r.error) || 'no response from the content script';
+    const budgetLeft = !Number(msg.deadline) || Date.now() < Number(msg.deadline) - RETRY_MIN_BUDGET_MS;
+    const canRetry = !!(r && r.recoverable) && attempt === 0 && budgetLeft;
+    if (!canRetry) {
+      const suffix = attempt > 0 ? ' (auto-recovery: the page was reloaded and retried once — same error recurred)' : '';
+      respond(msg.id, { type: 'error', error: errMsg + suffix });
+      return;
+    }
+    const reloaded = await reloadAndVerify(tab.id, msg.conversation, boundConversationId);
+    if (!reloaded) {
+      respond(msg.id, {
+        type: 'error',
+        error: errMsg + ' (auto-recovery skipped: the tab could not be reloaded back onto the same page)'
+      });
+      return;
+    }
+    // Loop around: attempt 1 re-sends the same payload to the fresh page.
   }
 }
 

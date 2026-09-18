@@ -15,6 +15,10 @@
 //  10. the heartbeat keeps live clients and terminates silent ones (audit F3)
 //  11. a non-numeric BRIDGE_COMPOSER_LIMIT falls back loudly, no NaN silence
 //      (tester re-check)
+//  12. the F3 BENEFIT itself: an IN-FLIGHT request fails fast with
+//      "extension disconnected" instead of hanging to its full timeout
+//      (tester round 3 — the mechanism test above stays green even if
+//      failAllPending is refactored away; this one goes red instead)
 //
 // Spawns its own relay instance on PORT=8799 so it never fights the real one.
 'use strict';
@@ -106,11 +110,13 @@ async function main() {
   child.stderr.on('data', (c) => logs.push(String(c)));
 
   // Total-time guard so a wedged relay can't hang the whole test chain.
+  // 45s: case [11] worst-case path is a full 20s in-flight timeout, and the
+  // bad-env relay in [10] needs up to ~7s — 30s left no margin for that.
   const killTimer = setTimeout(() => {
     try { child.kill(); } catch (e) {}
     console.error('test-health: overall timeout — relay logs:\n' + logs.join(''));
     process.exit(1);
-  }, 30000);
+  }, 45000);
 
   try {
     // [1] relay comes up; initial extension identity is all-null.
@@ -297,6 +303,50 @@ async function main() {
         'negative BRIDGE_HEARTBEAT_MS rejected with a warning too (R2)');
     } finally {
       try { badChild.kill(); } catch (e) {}
+    }
+
+    // [11] tester round 3 (2026-09-18): case [9] proves the heartbeat
+    // MECHANISM (a silent socket gets terminated). This proves the BENEFIT
+    // that mechanism exists to deliver: an IN-FLIGHT /api/chat request fails
+    // FAST with "extension disconnected" instead of hanging until its full
+    // timeout. Discriminator from the tester: "if someone refactors away
+    // failAllPending (or the close-grace), the mechanism test stays green —
+    // would any assertion go red?" This one does: it only passes when the
+    // caller actually gets a fast, well-formed failure.
+    {
+      const f3Ws = await wsConnect();
+      const f3TimeoutMs = 20000;
+      const f3Start = Date.now();
+      // Custom request instead of postChat: postChat's 3s HTTP timeout is
+      // shorter than the fast-fail window this case is proving.
+      const f3Promise = new Promise((resolve, reject) => {
+        const body = JSON.stringify({ message: 'f3 fast-fail probe', timeoutMs: f3TimeoutMs });
+        const req = http.request(`${BASE}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+        }, (res) => {
+          let b = '';
+          res.on('data', (c) => { b += c; });
+          res.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } });
+        });
+        req.on('error', reject);
+        req.setTimeout(30000, () => req.destroy(new Error('f3 probe died at the HTTP layer (relay never resolved the pending request)')));
+        req.end(body);
+      });
+      // Swallow the relay's chat dispatch and answer NOTHING — the request
+      // stays pending while the link below goes dead.
+      f3Ws.on('message', () => {});
+      await sleep(300); // let the dispatch land before cutting the wire
+      f3Ws._socket.pause(); // silent peer: no pongs, no acks, no close
+      const f3Res = await f3Promise;
+      const f3Elapsed = Date.now() - f3Start;
+      assert(f3Res.ok === false,
+        'F3 benefit: in-flight request resolves ok:false when the extension link dies');
+      assert(/disconnected/i.test(f3Res.error || ''),
+        'F3 benefit: the error names the disconnect ("extension disconnected")');
+      assert(f3Elapsed < f3TimeoutMs - 3000,
+        `F3 benefit: failed fast in ${f3Elapsed}ms instead of hanging to the ${f3TimeoutMs}ms timeout`);
+      try { f3Ws.terminate(); } catch (e) {}
     }
 
     console.log(`\ntest-health: ${passed} passed, ${failures.length} failed`);
